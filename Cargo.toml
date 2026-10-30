@@ -1,0 +1,8 @@
+[package]
+name = "turboversion"
+version = "0.1.0"
+edition = "2021"
+description = "TUI per git con look Turbo C e UX stile SourceTree"
+
+[dependencies]
+ratatui = "0.29"
