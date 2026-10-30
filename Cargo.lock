@@ -446,6 +446,8 @@ name = "turboversion"
 version = "0.1.0"
 dependencies = [
  "ratatui",
+ "unicode-truncate",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]

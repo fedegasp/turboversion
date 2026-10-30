@@ -6,3 +6,5 @@ description = "TUI per git con look Turbo C e UX stile SourceTree"
 
 [dependencies]
 ratatui = "0.29"
+unicode-truncate = "1.1"
+unicode-width = "0.2"
