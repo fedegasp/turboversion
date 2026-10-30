@@ -48,6 +48,9 @@ dropdown menus — all classic Turbo Vision touches.
   toggle, diff scrolling.
 - **Turbo Vision-style menu bar**: `F10` or `Alt+<letter>` opens a dropdown
   menu, navigable with arrow keys.
+- **Modal dialogs**: Turbo Vision-style message boxes, Yes/No confirmations and
+  text-input prompts, centered with a drop shadow. They capture all input until
+  dismissed and the status bar switches to the dialog's own key hints.
 - Built on [`ratatui`](https://ratatui.rs) with a custom `Window` widget
   implementing the bordered/shadowed Turbo Vision chrome.
 
@@ -55,7 +58,10 @@ dropdown menus — all classic Turbo Vision touches.
 
 - [ ] Replace `src/mock.rs` with real repository data (via `git2` or shelling
       out to `git`): branches, commit log, working-tree status, diffs.
-- [ ] Wire up the menu actions (currently only `File > Quit` works).
+- [ ] Wire up the remaining menu actions. Working so far (on mock data):
+      `File > Quit`, `Branch > New branch...` (input dialog),
+      `Branch > Delete` (confirm dialog), `Help > About`; the rest show a
+      "not available yet" dialog.
 - [ ] Stage/unstage and commit from the UI.
 - [ ] Branch checkout/creation/deletion.
 - [ ] Repository picker (`File > Open repository...`, `Clone...`).
@@ -92,7 +98,17 @@ cargo test
 | `↑` / `↓` (menu open) | Move selection within the dropdown |
 | `Enter` (menu open) | Activate the selected menu item |
 | `Esc` / `F10` (menu open) | Close the menu |
-| `q` / `Alt+X` | Quit |
+| `q` / `Alt+X` | Quit (`Alt+X` also works with a dialog open) |
+
+### Dialogs
+
+| Key | Action |
+|---|---|
+| `Enter` | Activate the focused button (`OK` / `Yes`) |
+| `Esc` | Cancel / close |
+| `Tab` / `←` / `→` | Move between buttons |
+| `Y` / `N` | Answer a Yes/No dialog directly |
+| any text, `Backspace` | Edit the field of an input dialog |
 
 ## Project layout
 
@@ -101,6 +117,7 @@ src/
 ├── main.rs          Terminal setup/teardown, entry point
 ├── app.rs            Application state and input handling
 ├── ui.rs              Layout and rendering of all panels
+├── dialog.rs          Modal dialog state and key handling (no rendering)
 ├── theme.rs           Turbo Vision color palette and styles
 ├── mock.rs            Placeholder data (branches, commits, files, diff)
 └── widgets/

@@ -1,4 +1,5 @@
 mod app;
+mod dialog;
 mod mock;
 mod theme;
 mod ui;

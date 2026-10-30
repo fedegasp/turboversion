@@ -53,6 +53,27 @@ pub fn menubar_hotkey_selected() -> Style {
     Style::new().fg(Color::Red).bg(Color::Green)
 }
 
+/// Dialog modali: nero su grigio chiaro, come i box di Turbo Vision.
+pub fn dialog() -> Style {
+    Style::new().fg(Color::Black).bg(Color::Gray)
+}
+
+pub fn dialog_frame() -> Style {
+    dialog().add_modifier(Modifier::BOLD)
+}
+
+/// Pulsanti dei dialog; il focus è dato anche dalle parentesi `[ ]`, non solo dal colore.
+pub fn button(focused: bool) -> Style {
+    if focused {
+        Style::new()
+            .fg(Color::White)
+            .bg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(Color::Black).bg(Color::Green)
+    }
+}
+
 /// Ombra portata: le celle sotto restano, ma scurite.
 pub fn shadow() -> Style {
     Style::new().fg(Color::DarkGray).bg(Color::Black)

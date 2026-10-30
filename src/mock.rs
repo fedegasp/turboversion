@@ -1,13 +1,26 @@
 //! Dati finti per sviluppare la TUI senza dipendere da git.
 
-pub const BRANCHES: &[&str] = &[
-    "* main",
-    "  develop",
-    "  feature/menu",
-    "  origin/main",
-    "  origin/develop",
-    "  v0.1.0",
-];
+pub struct Branch {
+    pub name: String,
+    pub current: bool,
+}
+
+pub fn branches() -> Vec<Branch> {
+    [
+        ("main", true),
+        ("develop", false),
+        ("feature/menu", false),
+        ("origin/main", false),
+        ("origin/develop", false),
+        ("v0.1.0", false),
+    ]
+    .into_iter()
+    .map(|(name, current)| Branch {
+        name: name.to_string(),
+        current,
+    })
+    .collect()
+}
 
 pub struct Commit {
     pub graph: &'static str,
@@ -17,12 +30,42 @@ pub struct Commit {
 }
 
 pub const COMMITS: &[Commit] = &[
-    Commit { graph: "●─╮", hash: "a1b2c3d", msg: "Merge feature/menu", author: "Mario" },
-    Commit { graph: "│ ●", hash: "d4e5f6a", msg: "Add dropdown menu", author: "Luca" },
-    Commit { graph: "│ ●", hash: "9f8e7d6", msg: "Add menubar widget", author: "Luca" },
-    Commit { graph: "●─╯", hash: "c0ffee1", msg: "Fix status bar", author: "Mario" },
-    Commit { graph: "●  ", hash: "b4dc0de", msg: "Window shadow", author: "Mario" },
-    Commit { graph: "●  ", hash: "1234abc", msg: "Initial theme", author: "Mario" },
+    Commit {
+        graph: "●─╮",
+        hash: "a1b2c3d",
+        msg: "Merge feature/menu",
+        author: "Mario",
+    },
+    Commit {
+        graph: "│ ●",
+        hash: "d4e5f6a",
+        msg: "Add dropdown menu",
+        author: "Luca",
+    },
+    Commit {
+        graph: "│ ●",
+        hash: "9f8e7d6",
+        msg: "Add menubar widget",
+        author: "Luca",
+    },
+    Commit {
+        graph: "●─╯",
+        hash: "c0ffee1",
+        msg: "Fix status bar",
+        author: "Mario",
+    },
+    Commit {
+        graph: "●  ",
+        hash: "b4dc0de",
+        msg: "Window shadow",
+        author: "Mario",
+    },
+    Commit {
+        graph: "●  ",
+        hash: "1234abc",
+        msg: "Initial theme",
+        author: "Mario",
+    },
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -53,11 +96,31 @@ pub struct FileEntry {
 
 pub fn files() -> Vec<FileEntry> {
     vec![
-        FileEntry { path: "src/main.rs", status: FileStatus::Modified, staged: true },
-        FileEntry { path: "src/theme.rs", status: FileStatus::Modified, staged: false },
-        FileEntry { path: "src/ui.rs", status: FileStatus::Added, staged: false },
-        FileEntry { path: "README.md", status: FileStatus::Deleted, staged: false },
-        FileEntry { path: "notes.txt", status: FileStatus::Untracked, staged: false },
+        FileEntry {
+            path: "src/main.rs",
+            status: FileStatus::Modified,
+            staged: true,
+        },
+        FileEntry {
+            path: "src/theme.rs",
+            status: FileStatus::Modified,
+            staged: false,
+        },
+        FileEntry {
+            path: "src/ui.rs",
+            status: FileStatus::Added,
+            staged: false,
+        },
+        FileEntry {
+            path: "README.md",
+            status: FileStatus::Deleted,
+            staged: false,
+        },
+        FileEntry {
+            path: "notes.txt",
+            status: FileStatus::Untracked,
+            staged: false,
+        },
     ]
 }
 
