@@ -1,3 +1,10 @@
+//
+// src/mock.rs
+// TurboVersion
+//
+// 2026-10-30 Federico Gasperini
+//
+
 //! Dati finti per sviluppare la TUI senza dipendere da git.
 
 pub struct Branch {

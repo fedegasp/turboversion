@@ -1,3 +1,10 @@
+//
+// src/theme.rs
+// TurboVersion
+//
+// 2026-10-30 Federico Gasperini
+//
+
 //! Palette e stili in stile Turbo C / Turbo Vision (16 colori ANSI).
 
 use ratatui::style::{Color, Modifier, Style};

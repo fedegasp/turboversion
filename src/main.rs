@@ -1,3 +1,10 @@
+//
+// src/main.rs
+// TurboVersion
+//
+// 2026-10-30 Federico Gasperini
+//
+
 mod app;
 mod dialog;
 mod mock;

@@ -1,3 +1,10 @@
+//
+// src/dialog.rs
+// TurboVersion
+//
+// 2026-10-30 Federico Gasperini
+//
+
 //! Stato e input dei dialog modali (nessun rendering qui, vedi `ui.rs`).
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};

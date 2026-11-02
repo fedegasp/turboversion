@@ -1,3 +1,10 @@
+//
+// src/ui.rs
+// TurboVersion
+//
+// 2026-10-30 Federico Gasperini
+//
+
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Margin, Rect},
     text::{Line, Span},

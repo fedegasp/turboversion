@@ -1,3 +1,10 @@
+//
+// src/app.rs
+// TurboVersion
+//
+// 2026-10-30 Federico Gasperini
+//
+
 use std::io;
 
 use ratatui::{

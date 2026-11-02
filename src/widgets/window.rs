@@ -1,3 +1,10 @@
+//
+// src/widgets/window.rs
+// TurboVersion
+//
+// 2026-10-30 Federico Gasperini
+//
+
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -50,7 +57,7 @@ impl Widget for Window<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         Clear.render(area, buf);
         let border_type = if self.active {
-            BorderType::Double
+            BorderType::Thick
         } else {
             BorderType::Plain
         };
