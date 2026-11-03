@@ -2,12 +2,15 @@
 // src/dialog.rs
 // TurboVersion
 //
-// 2026-10-30 Federico Gasperini
+// 2026-11-03 Federico Gasperini
 //
 
-//! Stato e input dei dialog modali (nessun rendering qui, vedi `ui.rs`).
+//! Stato e input dei dialog modali (nessun rendering qui, vedi
+//! `ui::panels::dialog`). Il dialog è un overlay del `Model` (vedi
+//! `app::Model::dialog`): riceve i `Msg` prima del menu e dei pannelli
+//! principali.
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::msg::Msg;
 
 const MAX_INPUT: usize = 64;
 
@@ -57,11 +60,19 @@ impl Dialog {
         Self::new(Kind::Message, title.into(), text.into(), Action::Info)
     }
 
-    pub(crate) fn confirm(title: impl Into<String>, text: impl Into<String>, action: Action) -> Self {
+    pub(crate) fn confirm(
+        title: impl Into<String>,
+        text: impl Into<String>,
+        action: Action,
+    ) -> Self {
         Self::new(Kind::Confirm, title.into(), text.into(), action)
     }
 
-    pub(crate) fn input(title: impl Into<String>, prompt: impl Into<String>, action: Action) -> Self {
+    pub(crate) fn input(
+        title: impl Into<String>,
+        prompt: impl Into<String>,
+        action: Action,
+    ) -> Self {
         Self::new(Kind::Input, title.into(), prompt.into(), action)
     }
 
@@ -92,36 +103,31 @@ impl Dialog {
     }
 
     /// `Some(true)` = accettato, `Some(false)` = annullato, `None` = ancora aperto.
-    pub(crate) fn on_key(&mut self, key: KeyEvent) -> Option<bool> {
+    pub(crate) fn on_msg(&mut self, msg: Msg) -> Option<bool> {
         let n = self.buttons().len();
-        match key.code {
-            KeyCode::Esc => return Some(false),
-            KeyCode::Enter => return Some(self.button == 0),
-            KeyCode::Tab | KeyCode::Right => self.button = (self.button + 1) % n,
-            KeyCode::BackTab | KeyCode::Left => self.button = (self.button + n - 1) % n,
-            KeyCode::Backspace if self.kind == Kind::Input => {
+        match msg {
+            Msg::Esc => return Some(false),
+            Msg::Enter => return Some(self.button == 0),
+            Msg::Tab | Msg::Right => self.button = (self.button + 1) % n,
+            Msg::BackTab | Msg::Left => self.button = (self.button + n - 1) % n,
+            Msg::Backspace if self.kind == Kind::Input => {
                 self.input.pop();
             }
             // Esclude i veri shortcut Ctrl+lettera, ma non AltGr (riportato da
             // molte piattaforme come Ctrl+Alt) che deve restare testo digitabile.
-            KeyCode::Char(c)
-                if !key.modifiers.contains(KeyModifiers::CONTROL)
-                    || key.modifiers.contains(KeyModifiers::ALT) =>
-            {
-                match self.kind {
-                    Kind::Input => {
-                        if !c.is_control() && self.input.chars().count() < MAX_INPUT {
-                            self.input.push(c);
-                        }
+            Msg::Char { c, is_plain_ctrl } if !is_plain_ctrl => match self.kind {
+                Kind::Input => {
+                    if !c.is_control() && self.input.chars().count() < MAX_INPUT {
+                        self.input.push(c);
                     }
-                    Kind::Confirm => match c.to_ascii_lowercase() {
-                        'y' => return Some(true),
-                        'n' => return Some(false),
-                        _ => {}
-                    },
-                    Kind::Message => {}
                 }
-            }
+                Kind::Confirm => match c.to_ascii_lowercase() {
+                    'y' => return Some(true),
+                    'n' => return Some(false),
+                    _ => {}
+                },
+                Kind::Message => {}
+            },
             _ => {}
         }
         None
@@ -132,59 +138,60 @@ impl Dialog {
 mod tests {
     use super::*;
 
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::NONE)
+    fn char_msg(c: char) -> Msg {
+        Msg::Char {
+            c,
+            is_plain_ctrl: false,
+        }
+    }
+
+    fn plain_ctrl_msg(c: char) -> Msg {
+        Msg::Char {
+            c,
+            is_plain_ctrl: true,
+        }
     }
 
     #[test]
     fn message_closes_with_enter_or_esc() {
-        assert_eq!(
-            Dialog::info("t", "x").on_key(key(KeyCode::Enter)),
-            Some(true)
-        );
-        assert_eq!(
-            Dialog::info("t", "x").on_key(key(KeyCode::Esc)),
-            Some(false)
-        );
+        assert_eq!(Dialog::info("t", "x").on_msg(Msg::Enter), Some(true));
+        assert_eq!(Dialog::info("t", "x").on_msg(Msg::Esc), Some(false));
     }
 
     #[test]
     fn confirm_buttons_and_hotkeys() {
         let mut d = Dialog::confirm("t", "x", Action::Info);
-        assert_eq!(d.on_key(key(KeyCode::Right)), None);
+        assert_eq!(d.on_msg(Msg::Right), None);
         assert_eq!(d.button, 1);
-        assert_eq!(d.on_key(key(KeyCode::Enter)), Some(false));
-        assert_eq!(d.on_key(key(KeyCode::Left)), None);
-        assert_eq!(d.on_key(key(KeyCode::Enter)), Some(true));
-        assert_eq!(d.on_key(key(KeyCode::Char('N'))), Some(false));
-        assert_eq!(d.on_key(key(KeyCode::Char('y'))), Some(true));
+        assert_eq!(d.on_msg(Msg::Enter), Some(false));
+        assert_eq!(d.on_msg(Msg::Left), None);
+        assert_eq!(d.on_msg(Msg::Enter), Some(true));
+        assert_eq!(d.on_msg(char_msg('N')), Some(false));
+        assert_eq!(d.on_msg(char_msg('y')), Some(true));
     }
 
     #[test]
     fn input_collects_text_and_ignores_controls() {
         let mut d = Dialog::input("t", "Name:", Action::NewBranch);
         for c in "ab".chars() {
-            assert_eq!(d.on_key(key(KeyCode::Char(c))), None);
+            assert_eq!(d.on_msg(char_msg(c)), None);
         }
-        d.on_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+        d.on_msg(plain_ctrl_msg('z'));
         assert_eq!(d.input, "ab");
-        d.on_key(key(KeyCode::Backspace));
+        d.on_msg(Msg::Backspace);
         assert_eq!(d.input, "a");
-        d.on_key(key(KeyCode::Tab));
-        assert_eq!(d.on_key(key(KeyCode::Enter)), Some(false));
+        d.on_msg(Msg::Tab);
+        assert_eq!(d.on_msg(Msg::Enter), Some(false));
     }
 
     #[test]
     fn input_accepts_altgr_like_combos_but_not_plain_control() {
         let mut d = Dialog::input("t", "Name:", Action::NewBranch);
         // AltGr è spesso riportato come Ctrl+Alt: deve restare testo.
-        d.on_key(KeyEvent::new(
-            KeyCode::Char('e'),
-            KeyModifiers::CONTROL | KeyModifiers::ALT,
-        ));
+        d.on_msg(char_msg('e'));
         assert_eq!(d.input, "e");
         // Un vero Ctrl+lettera resta uno shortcut, non va inserito.
-        d.on_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+        d.on_msg(plain_ctrl_msg('z'));
         assert_eq!(d.input, "e");
     }
 
@@ -192,7 +199,7 @@ mod tests {
     fn input_is_length_limited() {
         let mut d = Dialog::input("t", "Name:", Action::NewBranch);
         for _ in 0..(MAX_INPUT + 10) {
-            d.on_key(key(KeyCode::Char('a')));
+            d.on_msg(char_msg('a'));
         }
         assert_eq!(d.input.chars().count(), MAX_INPUT);
     }

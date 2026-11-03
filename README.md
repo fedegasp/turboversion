@@ -23,12 +23,12 @@ changes and diff, all visible at once, navigable entirely from the keyboard.
 ║   feature/.. ║║ │ ● 9f8e7d6 Add menubar widget               Luca       ║
 ║   origin/... ║║ ●─╯ c0ffee1 Fix status bar                   Mario      ║
 ║   v0.1.0     ║╚══════════════════════════════════════════════════════════╝
-║              ║┌ Changes ═══════════┐┌ Diff ═══════════════════════════════┐
-║              ║│ [x] M src/main.rs  ││ diff --git a/src/theme.rs ...       │
-║              ║│ [ ] M src/theme.rs ││ @@ -1,6 +1,9 @@                     │
-╚══════════════╝│ [ ] A src/ui.rs    ││-pub fn window() -> Style {          │
-                │ [ ] D README.md    ││+pub fn window() -> Style {          │
-                └────────────────────┘└─────────────────────────────────────┘
+║              ║┌ Changes ═══════════┐┌ Diff ══════════════════════════════┐
+║              ║│ [x] M src/main.rs  ││ diff --git a/src/theme.rs ...      │
+║              ║│ [ ] M src/theme.rs ││ @@ -1,6 +1,9 @@                    │
+╚══════════════╝│ [ ] A src/ui.rs    ││-pub fn window() -> Style {         │
+                │ [ ] D README.md    ││+pub fn window() -> Style {         │
+                └────────────────────┘└────────────────────────────────────┘
  Tab Panel  ↑↓ Move  Space Stage  F10 Menu  Alt-X Quit
 ```
 
@@ -99,12 +99,12 @@ cargo test
 | `↑` / `↓` (menu open) | Move selection within the dropdown |
 | `Enter` (menu open) | Activate the selected menu item |
 | `Esc` / `F10` (menu open) | Close the menu |
-| `q` / `Alt+X` / `Ctrl+C` | Quit (`Alt+X` and `Ctrl+C` also work with a dialog or menu open) |
+| `Alt+X` / `Ctrl+C` | Quit (`Alt+X` and `Ctrl+C` also work with a dialog or menu open) |
 
 > **macOS note:** Terminal.app does not send `Alt`/`Option` as a Meta key by
 > default, so `Alt+X` and `Alt+<letter>` menu shortcuts won't register unless
 > you enable *Use Option as Meta Key* in the profile's Keyboard settings (or
-> use an emulator that does this by default, e.g. iTerm2). `F10`/`q` and
+> use an emulator that does this by default, e.g. iTerm2). `F10` and
 > `Ctrl+C` always work regardless of this setting.
 
 ### Dialogs

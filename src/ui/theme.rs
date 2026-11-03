@@ -1,8 +1,8 @@
 //
-// src/theme.rs
+// src/ui/theme.rs
 // TurboVersion
 //
-// 2026-10-30 Federico Gasperini
+// 2026-11-03 Federico Gasperini
 //
 
 //! Palette e stili in stile Turbo C / Turbo Vision (16 colori ANSI).

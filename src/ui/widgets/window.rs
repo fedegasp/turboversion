@@ -1,8 +1,8 @@
 //
-// src/widgets/window.rs
+// src/ui/widgets/window.rs
 // TurboVersion
 //
-// 2026-10-30 Federico Gasperini
+// 2026-11-03 Federico Gasperini
 //
 
 use ratatui::{
@@ -12,11 +12,12 @@ use ratatui::{
     widgets::{Block, BorderType, Clear, Widget},
 };
 
-use crate::theme;
+use crate::ui::theme;
 
 /// Finestra stile Turbo Vision: bordo spesso (`Thick`) se attiva, sottile
 /// (`Plain`) se inattiva — il bordo doppio (`Double`) è riservato ai dialog,
-/// vedi `ui::draw_dialog` — titolo centrato sul bordo superiore.
+/// vedi `ui::panels::dialog::render_dialog` — titolo centrato sul bordo
+/// superiore.
 pub(crate) struct Window<'a> {
     title: &'a str,
     active: bool,
