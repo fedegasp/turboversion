@@ -6,8 +6,8 @@
 //
 
 //! Tipi di dominio: la vista "git" che il resto dell'app conosce, mai
-//! legata a un backend particolare (oggi il solo backend è
-//! `git::mock::MockGitRepo`, vedi `git::repo::GitRepo`).
+//! legata a un backend particolare (oggi `git::mock::MockGitRepo` e
+//! `git::git2::GitRepo`, entrambi dietro il trait `git::repo::Repo`).
 
 /// Tipo di riferimento: un ramo locale, un ramo remote-tracking o un tag.
 /// Solo i rami locali possono essere cancellati dall'app.

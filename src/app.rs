@@ -7,10 +7,12 @@
 
 //! `Model` (stato dell'applicazione) e `update` (`Model`, `Msg` -> `Vec<Cmd>`).
 //! `update` è puro: nessun I/O, nessun rendering, nessun `unwrap`. Le
-//! operazioni verso git passano da un `Cmd` restituito qui, eseguito da
-//! `effects::run` e il cui esito torna come un nuovo `Msg` (vedi `run`).
+//! operazioni verso git passano da un `Cmd` restituito qui, inviato al
+//! `Worker` (vedi `worker.rs`) il cui `Msg` di esito torna, più tardi, a un
+//! giro successivo di `run`.
 
 use std::io;
+use std::time::Duration;
 
 use ratatui::{
     crossterm::event::{self, Event, KeyEventKind},
@@ -19,11 +21,14 @@ use ratatui::{
 };
 
 use crate::dialog::{Action, Dialog};
+#[cfg(test)]
+use crate::effects;
 use crate::git::domain::{Branch, BranchKind, Commit, FileEntry};
-use crate::git::repo::{GitError, GitRepo};
+use crate::git::repo::GitError;
 use crate::input;
 use crate::msg::{Cmd, Msg};
-use crate::{effects, ui};
+use crate::ui;
+use crate::worker::Worker;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Panel {
@@ -116,9 +121,9 @@ pub(crate) struct MenuState {
 }
 
 /// Overlay impilabili sopra i pannelli principali. Vivono in uno stack nel
-/// `Model` (regola 5 di `architettura-tui`): l'overlay in cima riceve per
-/// primo gli input (vedi `dispatch_key`). Oggi lo stack non supera mai un
-/// elemento, ma la lettura guarda comunque solo la cima.
+/// `Model`: l'overlay in cima riceve per primo gli input (vedi
+/// `dispatch_key`). Oggi lo stack non supera mai un elemento, ma la lettura
+/// guarda comunque solo la cima.
 pub(crate) enum Overlay {
     Menu(MenuState),
     Dialog(Dialog),
@@ -193,37 +198,50 @@ pub(crate) fn init_cmds() -> Vec<Cmd> {
     vec![Cmd::LoadAll]
 }
 
-/// Ciclo principale: disegna, legge un tasto, lo traduce in `Msg` (vedi
-/// `input::key_to_msg`), applica `update` e, se richiede effetti, li esegue
-/// subito tramite `effects::run` rialimentando il loro `Msg` di esito in
-/// `update` (vedi il commento in `effects.rs` sul perché è sincrono).
+/// Intervallo di `event::poll`: abbastanza breve da non introdurre un
+/// ritardo percepibile nel drenare i `Msg` del worker tra un tasto e
+/// l'altro, abbastanza lungo da non consumare CPU in un loop stretto da
+/// ferma.
+const POLL_TIMEOUT: Duration = Duration::from_millis(50);
+
+/// Ciclo principale: disegna, aspetta fino a `POLL_TIMEOUT` un tasto (non
+/// bloccante: un backend git reale può impiegare più di un giro a
+/// rispondere, vedi `worker.rs`), lo traduce in `Msg` (vedi
+/// `input::key_to_msg`) e lo passa a `dispatch`; poi, con o senza tasto,
+/// drena i `Msg` già pronti dal worker e li applica con `update`.
 pub(crate) fn run(
     model: &mut Model,
-    repo: &mut dyn GitRepo,
+    worker: &Worker,
     terminal: &mut DefaultTerminal,
 ) -> io::Result<()> {
     while model.running {
         terminal.draw(|f| ui::view(f, model))?;
-        if let Event::Key(key) = event::read()? {
-            if key.kind == KeyEventKind::Press {
-                if let Some(msg) = input::key_to_msg(key) {
-                    dispatch(model, repo, msg);
+
+        if event::poll(POLL_TIMEOUT)? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press {
+                    if let Some(msg) = input::key_to_msg(key) {
+                        dispatch(model, worker, msg);
+                    }
                 }
             }
+            // Gli eventi Resize fanno semplicemente ridisegnare al giro dopo.
         }
-        // Gli eventi Resize fanno semplicemente ridisegnare al giro dopo.
+
+        while let Some(msg) = worker.try_recv() {
+            update(model, msg);
+        }
     }
     Ok(())
 }
 
-/// Applica `msg` e, se `update` ha richiesto effetti, li esegue
-/// immediatamente rialimentando il loro esito.
-fn dispatch(model: &mut Model, repo: &mut dyn GitRepo, msg: Msg) {
+/// Applica `msg` e inoltra al worker ogni `Cmd` richiesto da `update`. A
+/// differenza del vecchio `dispatch` sincrono (sostituito da questo), il
+/// `Msg` di esito non torna qui: arriva più tardi, drenato da `run` tramite
+/// `Worker::try_recv`.
+fn dispatch(model: &mut Model, worker: &Worker, msg: Msg) {
     for cmd in update(model, msg) {
-        let result = effects::run(cmd, repo);
-        // Un Cmd produce un solo Msg di esito, mai altri Cmd: nessun rischio
-        // di ricorsione.
-        update(model, result);
+        worker.send(cmd);
     }
 }
 
@@ -544,6 +562,14 @@ mod tests {
     /// effetti contro un `MockGitRepo`) per i test, esponendo il `Model`
     /// tramite `Deref`/`DerefMut`: un wrapper di comodo solo per i test, non
     /// un tipo pubblico dell'app.
+    ///
+    /// A differenza di `run`/`dispatch` di produzione, qui non passa da un
+    /// `Worker`: comporrebbe `update()` + `effects::run()` contro un vero
+    /// thread in background, rendendo i test dipendenti dal timing di quel
+    /// thread. Compone invece `update()` + `effects::run()` direttamente
+    /// contro `MockGitRepo`, esattamente come `model_for_tests` sopra: resta
+    /// deterministico e veloce, e non duplica la logica di smistamento (che
+    /// vive comunque solo in `update`).
     struct TestApp {
         model: Model,
         repo: MockGitRepo,
@@ -561,7 +587,12 @@ mod tests {
         }
 
         fn send(&mut self, msg: Msg) {
-            dispatch(&mut self.model, &mut self.repo, msg);
+            for cmd in update(&mut self.model, msg) {
+                let result = effects::run(cmd, &mut self.repo);
+                // Un Cmd produce un solo Msg di esito, mai altri Cmd: nessun
+                // rischio di ricorsione.
+                update(&mut self.model, result);
+            }
         }
     }
 

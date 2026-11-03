@@ -5,13 +5,13 @@
 // 2026-11-03 Federico Gasperini
 //
 
-//! Implementazione di `GitRepo` che riproduce in memoria i dati finti e il
+//! Implementazione di `Repo` che riproduce in memoria i dati finti e il
 //! comportamento (inclusa la validazione dei nomi di ramo) che nel
 //! prototipo iniziale vivevano sparsi tra `app.rs` e `mock.rs`. Serve a
 //! sviluppare la TUI senza dipendere da un repository reale.
 
 use super::domain::{Branch, BranchKind, Commit, FileEntry, FileStatus};
-use super::repo::{GitError, GitRepo};
+use super::repo::{GitError, Repo};
 
 fn initial_branches() -> Vec<Branch> {
     [
@@ -149,7 +149,7 @@ impl Default for MockGitRepo {
     }
 }
 
-impl GitRepo for MockGitRepo {
+impl Repo for MockGitRepo {
     fn branches(&self) -> Vec<Branch> {
         self.branches.clone()
     }

@@ -5,19 +5,21 @@
 // 2026-11-03 Federico Gasperini
 //
 
-//! Esegue i `Cmd` contro il confine `GitRepo` e produce il `Msg` di esito.
-//! Questo è l'unico modulo che invoca `GitRepo`.
+//! Esegue i `Cmd` contro il confine `Repo` e produce il `Msg` di esito.
+//! Questo è l'unico modulo che invoca `Repo`.
 //!
-//! Oggi l'unico backend è `MockGitRepo`, che opera in memoria e risponde in
-//! microsecondi: eseguire i comandi in modo sincrono, nello stesso ciclo di
-//! `app::run`, è quindi sufficiente e non blocca la UI. Quando arriverà un
-//! vero backend Git (vedi roadmap in README.md) questa funzione andrà
-//! spostata su un worker thread, inviando il `Msg` di esito tramite canale.
+//! `run` resta sincrona e non sa nulla di thread: in produzione (backend
+//! `git::git2::GitRepo`, che può bloccare su I/O) è `worker::Worker` a
+//! chiamarla da un thread dedicato, fuori dal thread UI (vedi `worker.rs`).
+//! Nei test (`MockGitRepo`, in memoria, risposta immediata) `TestApp`/
+//! `model_for_tests` in `src/app.rs` la chiamano invece direttamente, nello
+//! stesso thread, per restare deterministici e non dipendere dal timing di
+//! un thread in background.
 
-use crate::git::repo::GitRepo;
+use crate::git::repo::Repo;
 use crate::msg::{Cmd, Msg};
 
-pub(crate) fn run(cmd: Cmd, repo: &mut dyn GitRepo) -> Msg {
+pub(crate) fn run(cmd: Cmd, repo: &mut dyn Repo) -> Msg {
     match cmd {
         Cmd::LoadAll => Msg::Loaded {
             branches: repo.branches(),

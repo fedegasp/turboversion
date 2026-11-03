@@ -7,7 +7,7 @@
 
 //! Eventi in ingresso (`Msg`) ed effetti richiesti (`Cmd`), lo scambio
 //! comune tra `input` (produce `Msg`), `app::update` (consuma `Msg`,
-//! produce `Cmd`) ed `effects` (esegue `Cmd` contro `GitRepo`, produce il
+//! produce `Cmd`) ed `effects` (esegue `Cmd` contro `Repo`, produce il
 //! `Msg` di esito).
 
 use crate::git::domain::{Branch, Commit, FileEntry};
@@ -44,7 +44,7 @@ pub(crate) enum Msg {
         c: char,
         is_plain_ctrl: bool,
     },
-    /// Esito di `Cmd::LoadAll`: i dati iniziali letti da `GitRepo`.
+    /// Esito di `Cmd::LoadAll`: i dati iniziali letti da `Repo`.
     Loaded {
         branches: Vec<Branch>,
         commits: Vec<Commit>,
@@ -64,7 +64,7 @@ pub(crate) enum Msg {
     },
 }
 
-/// Effetto richiesto da `update`, da eseguire contro `GitRepo` (vedi
+/// Effetto richiesto da `update`, da eseguire contro `Repo` (vedi
 /// `effects::run`).
 #[derive(Debug)]
 pub(crate) enum Cmd {

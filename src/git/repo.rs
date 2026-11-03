@@ -5,20 +5,21 @@
 // 2026-11-03 Federico Gasperini
 //
 
-//! Confine verso git: un solo trait, `GitRepo`, con tipi di ritorno di
-//! dominio (mai tipi di un backend esterno). Oggi l'unica implementazione è
-//! `git::mock::MockGitRepo`; un backend reale (es. basato su `git2`, vedi
-//! roadmap in README.md) implementerebbe lo stesso trait senza che
-//! `app`/`ui` debbano cambiare.
+//! Confine verso git: un solo trait, `Repo`, con tipi di ritorno di dominio
+//! (mai tipi di un backend esterno). Oggi ci sono due implementazioni:
+//! `git::mock::MockGitRepo` (dati finti in memoria, usata dai test) e
+//! `git::git2::GitRepo` (repository reale, via `git2`, usata in
+//! produzione); entrambe implementano lo stesso trait senza che `app`/`ui`
+//! debbano saperne la differenza.
 
 use std::fmt;
 
 use super::domain::{Branch, Commit, FileEntry};
 
-/// Errore di un'operazione `GitRepo`, con un messaggio già pronto per
-/// essere mostrato in un dialog. Questo prototipo ha un solo backend
-/// (mock) che non ha bisogno di varianti più strutturate; un backend reale
-/// potrebbe arricchire questo tipo quando ne emergerà il bisogno.
+/// Errore di un'operazione `Repo`, con un messaggio già pronto per essere
+/// mostrato in un dialog. Oggi un messaggio di testo semplice basta a
+/// entrambi i backend; varianti più strutturate potranno arricchire questo
+/// tipo quando ne emergerà il bisogno.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GitError(pub(crate) String);
 
@@ -30,7 +31,7 @@ impl fmt::Display for GitError {
 
 /// Confine unico verso git: letture (branch/commit/file/diff) e le due
 /// operazioni mutanti supportate da questo prototipo.
-pub(crate) trait GitRepo {
+pub(crate) trait Repo {
     fn branches(&self) -> Vec<Branch>;
     fn commits(&self) -> Vec<Commit>;
     fn files(&self) -> Vec<FileEntry>;

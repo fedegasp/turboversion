@@ -8,10 +8,13 @@ layout and workflow of **SourceTree**: branches, commit history, working-tree
 changes and diff, all visible at once, navigable entirely from the keyboard.
 
 > **Status: early prototype.** The UI, layout, menu system and keybindings
-> are implemented and working, but the app does not talk to a real Git
-> repository yet — all panels are populated with mock data
-> (see [`src/mock.rs`](src/mock.rs)) so the interface can be built and tuned
-> independently of the Git backend.
+> are implemented and working. The app now reads branches, commit history,
+> working-tree status and diffs from a real Git repository (via
+> [`git2`](https://docs.rs/git2), see [`src/git/git2.rs`](src/git/git2.rs)):
+> it picks up the repository containing the current directory and exits
+> with an error if there isn't one. Writing to the repository (branch
+> create/delete, staging, commits) isn't wired up yet; `src/git/mock.rs` is
+> now test-only fixture data.
 
 ## Preview
 
@@ -57,12 +60,14 @@ Vision touches.
 
 ## Roadmap
 
-- [ ] Replace `src/mock.rs` with real repository data (via `git2` or shelling
-      out to `git`): branches, commit log, working-tree status, diffs.
-- [ ] Wire up the remaining menu actions. Working so far (on mock data):
-      `File > Quit`, `Branch > New branch...` (input dialog),
-      `Branch > Delete` (confirm dialog), `Help > About`; the rest show a
-      "not available yet" dialog.
+- [x] Replace mock data with real repository data (via `git2`): branches,
+      commit log, working-tree status, diffs. Read-only so far; see
+      "Known limitations" below.
+- [ ] Wire up the remaining menu actions. Working so far: `File > Quit`,
+      `Help > About`. `Branch > New branch...` and `Branch > Delete` open
+      their dialog and submit, but the real backend doesn't support writing
+      yet, so they report an error instead of changing the repository; the
+      rest show a "not available yet" dialog.
 - [ ] Stage/unstage and commit from the UI.
 - [ ] Branch checkout/creation/deletion.
 - [ ] Repository picker (`File > Open repository...`, `Clone...`).
