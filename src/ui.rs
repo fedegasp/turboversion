@@ -5,6 +5,8 @@
 // 2026-10-30 Federico Gasperini
 //
 
+use std::borrow::Cow;
+
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Margin, Rect},
     text::{Line, Span},
@@ -12,7 +14,7 @@ use ratatui::{
     Frame,
 };
 use unicode_truncate::{Alignment as UAlign, UnicodeTruncateStr};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{App, MenuState, Panel, MENUS},
@@ -28,11 +30,36 @@ const NARROW: u16 = 80;
 const MIN_WIDTH: u16 = 20;
 const MIN_HEIGHT: u16 = 6;
 
-type Hints = &'static [(&'static str, &'static str)];
+type Hints = Cow<'static, [(&'static str, &'static str)]>;
+
+/// Sostituisce i tab con spazi (allineati a colonne di 4) prima che il testo
+/// arrivi a schermo: dati non fidati (messaggi di commit, percorsi, diff) non
+/// devono rompere l'allineamento dei pannelli, e i tab letterali non vengono
+/// comunque resi in modo leggibile dal terminale.
+fn expand_tabs(s: &str) -> Cow<'_, str> {
+    if !s.contains('\t') {
+        return Cow::Borrowed(s);
+    }
+    const TAB_STOP: usize = 4;
+    let mut out = String::with_capacity(s.len());
+    let mut col = 0usize;
+    for ch in s.chars() {
+        if ch == '\t' {
+            let spaces = TAB_STOP - (col % TAB_STOP);
+            out.extend(std::iter::repeat(' ').take(spaces));
+            col += spaces;
+        } else {
+            out.push(ch);
+            col += ch.width().unwrap_or(0);
+        }
+    }
+    Cow::Owned(out)
+}
 
 /// Tronca (con ellissi) o riempie `s` alla larghezza visuale `width`,
 /// tenendo conto di caratteri larghi/combinanti (non del solo conteggio byte/char).
 fn fit(s: &str, width: usize) -> String {
+    let s = expand_tabs(s);
     if width == 0 {
         return String::new();
     }
@@ -45,7 +72,7 @@ fn fit(s: &str, width: usize) -> String {
         .into_owned()
 }
 
-pub fn draw(f: &mut Frame, app: &mut App) {
+pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
 
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
@@ -134,7 +161,8 @@ fn draw_panel(f: &mut Frame, app: &mut App, panel: Panel, area: Rect) {
             let avail = (inner.width as usize).saturating_sub(GRAPH_W + HASH_W);
             let author_w = AUTHOR_W.min(avail);
             let msg_w = avail.saturating_sub(author_w);
-            let items: Vec<ListItem> = mock::COMMITS
+            let items: Vec<ListItem> = app
+                .commits
                 .iter()
                 .map(|c| {
                     ListItem::new(Line::from(vec![
@@ -171,7 +199,8 @@ fn draw_panel(f: &mut Frame, app: &mut App, panel: Panel, area: Rect) {
             render_list(f, items, inner, sel, &mut app.changes);
         }
         Panel::Diff => {
-            let lines: Vec<Line> = mock::DIFF
+            let lines: Vec<Line> = app
+                .diff
                 .iter()
                 .map(|l| {
                     let color = match l.chars().next() {
@@ -180,9 +209,10 @@ fn draw_panel(f: &mut Frame, app: &mut App, panel: Panel, area: Rect) {
                         Some('@') => Some(theme::HUNK),
                         _ => None,
                     };
+                    let text = expand_tabs(l).into_owned();
                     match color {
-                        Some(c) => Line::styled(*l, c),
-                        None => Line::raw(*l),
+                        Some(c) => Line::styled(text, c),
+                        None => Line::raw(text),
                     }
                 })
                 .collect();
@@ -238,10 +268,15 @@ fn draw_dropdown(f: &mut Frame, menubar: Rect, m: MenuState) {
     let x = menubar.x
         + MENUS[..m.menu]
             .iter()
-            .map(|(n, _)| n.chars().count() as u16 + 2)
+            .map(|(n, _)| n.width() as u16 + 2)
             .sum::<u16>();
     let items = MENUS[m.menu].1;
-    let w = items.iter().map(|s| s.chars().count()).max().unwrap_or(0) as u16 + 4;
+    let w = items
+        .iter()
+        .map(|(label, _)| label.width())
+        .max()
+        .unwrap_or(0) as u16
+        + 4;
     let h = items.len() as u16 + 2;
     let r = Rect::new(x, menubar.y + 1, w, h).intersection(f.area());
 
@@ -251,38 +286,43 @@ fn draw_dropdown(f: &mut Frame, menubar: Rect, m: MenuState) {
     let inner = block.inner(r);
     f.render_widget(block, r);
 
-    let list = List::new(items.iter().map(|s| ListItem::new(format!(" {s}"))))
+    let list = List::new(items.iter().map(|(label, _)| ListItem::new(format!(" {label}"))))
         .style(theme::menubar())
         .highlight_style(theme::menubar_selected());
     let mut st = ListState::default().with_selected(Some(m.item));
     f.render_stateful_widget(list, inner, &mut st);
 }
 
-const MAIN_KEYS: Hints = &[
-    ("Tab", "Panel"),
-    ("↑↓", "Move"),
-    ("Space", "Stage"),
-    ("F10", "Menu"),
-    ("Alt-X", "Quit"),
-];
-const MENU_KEYS: Hints = &[
+const MENU_KEYS: &[(&str, &str)] = &[
     ("←→", "Switch"),
     ("↑↓", "Select"),
     ("Enter", "Activate"),
     ("Esc", "Close"),
 ];
 
+/// Scorciatoie del pannello principale; `Space Stage` compare solo quando il
+/// focus è sul pannello Changes, dove quel tasto ha davvero effetto.
+fn main_hints(focus: Panel) -> Vec<(&'static str, &'static str)> {
+    let mut hints = vec![("Tab", "Panel"), ("↑↓", "Move")];
+    if focus == Panel::Changes {
+        hints.push(("Space", "Stage"));
+    }
+    hints.push(("F10", "Menu"));
+    hints.push(("Alt-X", "Quit"));
+    hints
+}
+
 fn hints(app: &App) -> Hints {
     match (&app.dialog, app.menu) {
-        (Some(d), _) => d.hints(),
-        (None, Some(_)) => MENU_KEYS,
-        (None, None) => MAIN_KEYS,
+        (Some(d), _) => Cow::Borrowed(d.hints()),
+        (None, Some(_)) => Cow::Borrowed(MENU_KEYS),
+        (None, None) => Cow::Owned(main_hints(app.focus)),
     }
 }
 
 fn draw_statusbar(f: &mut Frame, area: Rect, keys: Hints) {
     let mut spans = Vec::new();
-    for (k, label) in keys {
+    for (k, label) in keys.iter() {
         spans.push(Span::styled(format!(" {k}"), theme::menubar_hotkey()));
         spans.push(Span::styled(format!(" {label} "), theme::menubar()));
     }
@@ -291,6 +331,39 @@ fn draw_statusbar(f: &mut Frame, area: Rect, keys: Hints) {
         Paragraph::new(Line::from(spans)).style(theme::menubar()),
         area,
     );
+}
+
+/// Numero di righe che `Paragraph::wrap` userebbe per `line` su `width`
+/// colonne, spezzando sugli spazi (come il wrap a parole di ratatui) invece
+/// di dividere `width` per la larghezza totale della riga: una stima basata
+/// solo sulla divisione sottostima lo spazio quando il wrap va a capo prima
+/// della fine esatta di una colonna.
+fn wrapped_row_count(line: &str, width: usize) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    let mut rows = 1usize;
+    let mut col = 0usize;
+    for word in line.split_whitespace() {
+        let word_w = word.width();
+        if word_w > width {
+            // parola più lunga della riga: va comunque spezzata su più righe.
+            if col > 0 {
+                rows += 1;
+            }
+            rows += word_w / width;
+            col = word_w % width;
+            continue;
+        }
+        let needed = if col == 0 { word_w } else { col + 1 + word_w };
+        if needed > width {
+            rows += 1;
+            col = word_w;
+        } else {
+            col = needed;
+        }
+    }
+    rows
 }
 
 fn draw_dialog(f: &mut Frame, d: &Dialog) {
@@ -314,8 +387,9 @@ fn draw_dialog(f: &mut Frame, d: &Dialog) {
     let text_rows: usize = d
         .text
         .lines()
-        .map(|l| l.width().max(1).div_ceil(inner_w))
-        .sum();
+        .map(|l| wrapped_row_count(l, inner_w))
+        .sum::<usize>()
+        .max(1);
     let input_rows = if is_input { 2 } else { 0 };
     // bordi + margine verticale + testo + (input) + riga vuota + pulsanti
     let h = (text_rows + input_rows + 6).min(area.height.saturating_sub(2) as usize);
@@ -338,8 +412,10 @@ fn draw_dialog(f: &mut Frame, d: &Dialog) {
     let inner = block.inner(r).inner(Margin::new(PAD_X as u16, 1));
     f.render_widget(block, r);
 
+    // Il testo (Min) è il primo a restringersi se lo spazio manca; pulsanti
+    // e separatori (Length) restano quindi visibili il più a lungo possibile.
     let [text_area, _, input_area, _, btn_area] = Layout::vertical([
-        Constraint::Length(text_rows as u16),
+        Constraint::Min(1),
         Constraint::Length(u16::from(is_input)),
         Constraint::Length(u16::from(is_input)),
         Constraint::Length(1),
@@ -516,5 +592,42 @@ mod tests {
         let out = render(60, 24, &mut app);
         println!("{out}");
         assert!(out.contains("[ OK ]"));
+    }
+
+    #[test]
+    fn space_stage_hint_only_shows_when_changes_panel_is_focused() {
+        let mut app = App::new();
+        app.focus = Panel::History;
+        assert!(!render(80, 24, &mut app).contains("Stage"));
+
+        app.focus = Panel::Changes;
+        assert!(render(80, 24, &mut app).contains("Stage"));
+    }
+
+    #[test]
+    fn narrow_terminal_shows_only_the_focused_panel() {
+        for focus in [Panel::Branches, Panel::History, Panel::Changes, Panel::Diff] {
+            let body = Rect::new(0, 0, NARROW - 1, 24);
+            let panels = layout_panels(body, focus, NARROW - 1);
+            assert_eq!(panels, vec![(focus, body)]);
+        }
+    }
+
+    #[test]
+    fn wide_terminal_shows_all_panels() {
+        let body = Rect::new(0, 0, NARROW, 24);
+        let panels = layout_panels(body, Panel::History, NARROW);
+        let shown: Vec<Panel> = panels.iter().map(|(p, _)| *p).collect();
+        assert_eq!(
+            shown,
+            vec![Panel::Branches, Panel::History, Panel::Changes, Panel::Diff]
+        );
+    }
+
+    #[test]
+    fn tabs_in_diff_lines_are_expanded_instead_of_breaking_alignment() {
+        assert_eq!(expand_tabs("a\tb"), "a   b");
+        assert_eq!(expand_tabs("ab\tc"), "ab  c");
+        assert_eq!(expand_tabs("no tabs here"), "no tabs here");
     }
 }

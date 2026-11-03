@@ -3,8 +3,11 @@ name = "turboversion"
 version = "0.1.0"
 edition = "2021"
 description = "TUI per git con look Turbo C e UX stile SourceTree"
+license = "MIT"
+repository = "https://github.com/fedegasp/turboversion"
+rust-version = "1.70"
 
 [dependencies]
 ratatui = "0.29"
-unicode-truncate = "1.1"
+unicode-truncate = "2.0"
 unicode-width = "0.2"

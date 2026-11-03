@@ -5,4 +5,4 @@
 // 2026-10-30 Federico Gasperini
 //
 
-pub mod window;
+pub(crate) mod window;

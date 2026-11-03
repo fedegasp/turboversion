@@ -10,11 +10,11 @@
 use ratatui::style::{Color, Modifier, Style};
 
 /// Contenuto delle finestre: testo giallo su blu.
-pub fn window() -> Style {
+pub(crate) fn window() -> Style {
     Style::new().fg(Color::LightYellow).bg(Color::Blue)
 }
 
-pub fn border(active: bool) -> Style {
+pub(crate) fn border(active: bool) -> Style {
     let s = Style::new().fg(Color::White).bg(Color::Blue);
     if active {
         s.add_modifier(Modifier::BOLD)
@@ -23,7 +23,7 @@ pub fn border(active: bool) -> Style {
     }
 }
 
-pub fn title(active: bool) -> Style {
+pub(crate) fn title(active: bool) -> Style {
     if active {
         Style::new()
             .fg(Color::White)
@@ -35,7 +35,7 @@ pub fn title(active: bool) -> Style {
 }
 
 /// Riga selezionata in una lista.
-pub fn selection(focused: bool) -> Style {
+pub(crate) fn selection(focused: bool) -> Style {
     if focused {
         Style::new().fg(Color::Black).bg(Color::Cyan)
     } else {
@@ -44,33 +44,33 @@ pub fn selection(focused: bool) -> Style {
 }
 
 /// Barra dei menu, dropdown e status bar: nero su grigio chiaro.
-pub fn menubar() -> Style {
+pub(crate) fn menubar() -> Style {
     Style::new().fg(Color::Black).bg(Color::Gray)
 }
 
-pub fn menubar_hotkey() -> Style {
+pub(crate) fn menubar_hotkey() -> Style {
     Style::new().fg(Color::Red).bg(Color::Gray)
 }
 
-pub fn menubar_selected() -> Style {
+pub(crate) fn menubar_selected() -> Style {
     Style::new().fg(Color::Black).bg(Color::Green)
 }
 
-pub fn menubar_hotkey_selected() -> Style {
+pub(crate) fn menubar_hotkey_selected() -> Style {
     Style::new().fg(Color::Red).bg(Color::Green)
 }
 
 /// Dialog modali: nero su grigio chiaro, come i box di Turbo Vision.
-pub fn dialog() -> Style {
+pub(crate) fn dialog() -> Style {
     Style::new().fg(Color::Black).bg(Color::Gray)
 }
 
-pub fn dialog_frame() -> Style {
+pub(crate) fn dialog_frame() -> Style {
     dialog().add_modifier(Modifier::BOLD)
 }
 
 /// Pulsanti dei dialog; il focus è dato anche dalle parentesi `[ ]`, non solo dal colore.
-pub fn button(focused: bool) -> Style {
+pub(crate) fn button(focused: bool) -> Style {
     if focused {
         Style::new()
             .fg(Color::White)
@@ -82,14 +82,14 @@ pub fn button(focused: bool) -> Style {
 }
 
 /// Ombra portata: le celle sotto restano, ma scurite.
-pub fn shadow() -> Style {
+pub(crate) fn shadow() -> Style {
     Style::new().fg(Color::DarkGray).bg(Color::Black)
 }
 
 // Colori semantici usati nei contenuti.
-pub const GRAPH: Color = Color::LightGreen;
-pub const HASH: Color = Color::LightCyan;
-pub const DIM: Color = Color::Gray;
-pub const ADDED: Color = Color::LightGreen;
-pub const REMOVED: Color = Color::LightRed;
-pub const HUNK: Color = Color::LightMagenta;
+pub(crate) const GRAPH: Color = Color::LightGreen;
+pub(crate) const HASH: Color = Color::LightCyan;
+pub(crate) const DIM: Color = Color::Gray;
+pub(crate) const ADDED: Color = Color::LightGreen;
+pub(crate) const REMOVED: Color = Color::LightRed;
+pub(crate) const HUNK: Color = Color::LightMagenta;

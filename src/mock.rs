@@ -7,36 +7,48 @@
 
 //! Dati finti per sviluppare la TUI senza dipendere da git.
 
-pub struct Branch {
-    pub name: String,
-    pub current: bool,
+/// Tipo di riferimento: un ramo locale, un ramo remote-tracking o un tag.
+/// Solo i rami locali possono essere cancellati dall'app.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum BranchKind {
+    Local,
+    Remote,
+    Tag,
 }
 
-pub fn branches() -> Vec<Branch> {
+pub(crate) struct Branch {
+    pub(crate) name: String,
+    pub(crate) kind: BranchKind,
+    pub(crate) current: bool,
+}
+
+pub(crate) fn branches() -> Vec<Branch> {
     [
-        ("main", true),
-        ("develop", false),
-        ("feature/menu", false),
-        ("origin/main", false),
-        ("origin/develop", false),
-        ("v0.1.0", false),
+        ("main", BranchKind::Local, true),
+        ("develop", BranchKind::Local, false),
+        ("feature/menu", BranchKind::Local, false),
+        ("origin/main", BranchKind::Remote, false),
+        ("origin/develop", BranchKind::Remote, false),
+        ("v0.1.0", BranchKind::Tag, false),
     ]
     .into_iter()
-    .map(|(name, current)| Branch {
+    .map(|(name, kind, current)| Branch {
         name: name.to_string(),
+        kind,
         current,
     })
     .collect()
 }
 
-pub struct Commit {
-    pub graph: &'static str,
-    pub hash: &'static str,
-    pub msg: &'static str,
-    pub author: &'static str,
+#[derive(Clone, Copy)]
+pub(crate) struct Commit {
+    pub(crate) graph: &'static str,
+    pub(crate) hash: &'static str,
+    pub(crate) msg: &'static str,
+    pub(crate) author: &'static str,
 }
 
-pub const COMMITS: &[Commit] = &[
+pub(crate) const COMMITS: &[Commit] = &[
     Commit {
         graph: "●─╮",
         hash: "a1b2c3d",
@@ -75,8 +87,12 @@ pub const COMMITS: &[Commit] = &[
     },
 ];
 
+pub(crate) fn commits() -> Vec<Commit> {
+    COMMITS.to_vec()
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum FileStatus {
+pub(crate) enum FileStatus {
     Modified,
     Added,
     Deleted,
@@ -85,7 +101,7 @@ pub enum FileStatus {
 
 impl FileStatus {
     /// Lettera di stato in stile `git status --short`.
-    pub const fn label(self) -> char {
+    pub(crate) const fn label(self) -> char {
         match self {
             Self::Modified => 'M',
             Self::Added => 'A',
@@ -95,13 +111,13 @@ impl FileStatus {
     }
 }
 
-pub struct FileEntry {
-    pub path: &'static str,
-    pub status: FileStatus,
-    pub staged: bool,
+pub(crate) struct FileEntry {
+    pub(crate) path: &'static str,
+    pub(crate) status: FileStatus,
+    pub(crate) staged: bool,
 }
 
-pub fn files() -> Vec<FileEntry> {
+pub(crate) fn files() -> Vec<FileEntry> {
     vec![
         FileEntry {
             path: "src/main.rs",
@@ -131,7 +147,7 @@ pub fn files() -> Vec<FileEntry> {
     ]
 }
 
-pub const DIFF: &[&str] = &[
+pub(crate) const DIFF: &[&str] = &[
     "diff --git a/src/theme.rs b/src/theme.rs",
     "@@ -1,6 +1,9 @@",
     " use ratatui::style::{Color, Style};",
@@ -149,3 +165,7 @@ pub const DIFF: &[&str] = &[
     "+    Style::new().fg(Color::DarkGray).bg(Color::Black)",
     " }",
 ];
+
+pub(crate) fn diff() -> Vec<&'static str> {
+    DIFF.to_vec()
+}

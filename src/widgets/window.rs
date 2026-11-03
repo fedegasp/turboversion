@@ -14,27 +14,28 @@ use ratatui::{
 
 use crate::theme;
 
-/// Finestra stile Turbo Vision: bordo doppio se attiva, singolo se inattiva,
-/// titolo centrato sul bordo superiore.
-pub struct Window<'a> {
+/// Finestra stile Turbo Vision: bordo spesso (`Thick`) se attiva, sottile
+/// (`Plain`) se inattiva — il bordo doppio (`Double`) è riservato ai dialog,
+/// vedi `ui::draw_dialog` — titolo centrato sul bordo superiore.
+pub(crate) struct Window<'a> {
     title: &'a str,
     active: bool,
 }
 
 impl<'a> Window<'a> {
-    pub fn new(title: &'a str, active: bool) -> Self {
+    pub(crate) fn new(title: &'a str, active: bool) -> Self {
         Self { title, active }
     }
 
     /// Area utile dentro il bordo.
-    pub fn inner(area: Rect) -> Rect {
+    pub(crate) fn inner(area: Rect) -> Rect {
         Block::bordered().inner(area)
     }
 
     /// Ombra portata (2 colonne a destra, 1 riga sotto), clippata al buffer.
     /// Da usare solo per elementi flottanti (dropdown, dialog): va disegnata
     /// prima dell'elemento, che poi copre la propria area.
-    pub fn shadow(area: Rect, buf: &mut Buffer) {
+    pub(crate) fn shadow(area: Rect, buf: &mut Buffer) {
         let bounds = *buf.area();
         let (right, bottom) = (area.right(), area.bottom());
         let mut darken = |x: u16, y: u16| {
@@ -67,5 +68,32 @@ impl Widget for Window<'_> {
             .style(theme::window())
             .title(Line::styled(format!(" {} ", self.title), theme::title(self.active)).centered())
             .render(area, buf);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shadow_is_clipped_when_the_window_touches_the_buffer_edge() {
+        let buf_area = Rect::new(0, 0, 10, 5);
+        let mut buf = Buffer::empty(buf_area);
+        // La finestra sborda sia a destra (right=9, ultima colonna valida)
+        // sia in basso (bottom=4, ultima riga valida) rispetto al buffer:
+        // le celle ancora dentro i limiti devono comunque essere scurite,
+        // quelle fuori vanno silenziosamente ignorate invece di far
+        // andare in panico `Buffer::index_of`.
+        let window = Rect::new(5, 1, 4, 3);
+        Window::shadow(window, &mut buf);
+        assert_eq!(buf[(9, 2)].fg, theme::shadow().fg.unwrap());
+        assert_eq!(buf[(9, 2)].bg, theme::shadow().bg.unwrap());
+        assert_eq!(buf[(7, 4)].fg, theme::shadow().fg.unwrap());
+        assert_eq!(buf[(7, 4)].bg, theme::shadow().bg.unwrap());
+
+        // Una finestra completamente fuori dal bordo destro/inferiore non
+        // deve produrre alcun indice fuori dai limiti del buffer.
+        let fully_outside = Rect::new(20, 20, 5, 5);
+        Window::shadow(fully_outside, &mut buf);
     }
 }
