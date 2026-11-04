@@ -122,7 +122,7 @@ fn draw_panel(f: &mut Frame, model: &mut Model, panel: Panel, area: Rect) {
     // qui si sceglie solo con quale resa disegnarli.
     match view_model::rows(model, panel) {
         Rows::Branches(items, state) => panels::branches::render(f, items, inner, sel, state),
-        Rows::Commits(items, state) => panels::history::render(f, items, inner, sel, state),
+        Rows::History(items, state) => panels::history::render(f, items, inner, sel, state),
         Rows::Files(items, state) => panels::changes::render(f, items, inner, sel, state),
         Rows::Diff(lines, scroll) => panels::diff::render(f, lines, inner, scroll),
     }
@@ -142,15 +142,22 @@ fn draw_once<B: ratatui::backend::Backend>(t: &mut ratatui::Terminal<B>, model: 
 }
 
 /// Renderizza `model` su un backend di `w` x `h` colonne e restituisce il
-/// contenuto testuale del frame, riga per riga. Condiviso dai test di
-/// rendering in `ui` e nei suoi sottomoduli.
+/// buffer disegnato. Serve ai test che guardano gli attributi delle celle
+/// (colori, grassetto) e non solo i simboli.
 #[cfg(test)]
-pub(crate) fn render(w: u16, h: u16, model: &mut Model) -> String {
+pub(crate) fn render_buffer(w: u16, h: u16, model: &mut Model) -> ratatui::buffer::Buffer {
     use ratatui::{backend::TestBackend, Terminal};
 
     let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
     draw_once(&mut t, model);
-    let buf = t.backend().buffer().clone();
+    t.backend().buffer().clone()
+}
+
+/// Il contenuto testuale del frame, riga per riga. Condiviso dai test di
+/// rendering in `ui` e nei suoi sottomoduli.
+#[cfg(test)]
+pub(crate) fn render(w: u16, h: u16, model: &mut Model) -> String {
+    let buf = render_buffer(w, h, model);
     (0..h)
         .map(|y| {
             (0..w)
@@ -269,12 +276,8 @@ mod tests {
     /// (l'unico sfondo di quel colore nel frame), per verificare non solo
     /// *cosa* si disegna ma *dove* finisce la selezione.
     fn focused_selection_rows(w: u16, h: u16, model: &mut Model) -> Vec<String> {
-        use ratatui::{backend::TestBackend, Terminal};
-
         let want = theme::selection(true).bg;
-        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
-        draw_once(&mut t, model);
-        let buf = t.backend().buffer().clone();
+        let buf = render_buffer(w, h, model);
         (0..h)
             .filter_map(|y| {
                 let row: String = (0..w)

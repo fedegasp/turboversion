@@ -9,8 +9,8 @@
 //! dati da disegnare — scelti da `ui::view_model`, che li prende dal
 //! `Model` — e decide solo come appaiono: colori, troncamenti, larghezza
 //! delle colonne. Nessuno di essi legge il `Model` né chiama `git/`: così
-//! `branches` può servire due pannelli, `history` una lista che non è
-//! esattamente `Model::commits`, e nessun pannello può modificare lo stato
+//! `branches` può servire due pannelli, `history` una lista di righe che
+//! non sono tutte commit, e nessun pannello può modificare lo stato
 //! dell'applicazione mentre disegna.
 
 pub(crate) mod branches;

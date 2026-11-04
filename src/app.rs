@@ -137,6 +137,23 @@ pub(crate) enum Overlay {
     Dialog(Dialog),
 }
 
+/// Una riga del pannello History. Il log non è fatto di soli commit: in
+/// cima può esserci lo stato corrente della working copy, che un commit
+/// non è — non ha hash né autore, e nel repository non esiste finché non
+/// viene committato.
+///
+/// Sta qui e non in `git::domain` perché non è qualcosa che `Repo`
+/// restituisce: `Repo::commits` continua a dare `Vec<Commit>`, ed è il
+/// `Model` a comporre le due letture (commit e file modificati) nella
+/// lista che il pannello percorre. Di conseguenza la selezione di History
+/// non è più un indice in `Model::commits`.
+#[derive(Debug)]
+pub(crate) enum HistoryEntry {
+    /// Le modifiche non ancora committate della working copy.
+    WorkingCopy,
+    Commit(Commit),
+}
+
 /// Il contenuto di un pannello: la lista che mostra, insieme al cursore
 /// che la percorre, oppure le righe del diff con il suo scorrimento.
 ///
@@ -148,7 +165,7 @@ pub(crate) enum Overlay {
 /// si disegnano allo stesso modo, solo su liste diverse.
 pub(crate) enum PanelContent<'a> {
     Branches(&'a mut ListPanel<Branch>),
-    Commits(&'a mut ListPanel<Commit>),
+    History(&'a mut ListPanel<HistoryEntry>),
     Files(&'a mut ListPanel<FileEntry>),
     /// Il pannello Diff non è una lista con selezione: scorre per righe.
     /// `viewport` è l'altezza con cui il pannello è stato disegnato
@@ -168,7 +185,7 @@ impl PanelContent<'_> {
     fn step(&mut self, delta: i32) {
         match self {
             Self::Branches(list) => list.step(delta),
-            Self::Commits(list) => list.step(delta),
+            Self::History(list) => list.step(delta),
             Self::Files(list) => list.step(delta),
             Self::Diff {
                 lines,
@@ -206,7 +223,24 @@ pub(crate) struct Model {
     pub(crate) focus: Panel,
     pub(crate) local_branches: ListPanel<Branch>,
     pub(crate) remote_branches: ListPanel<Branch>,
-    pub(crate) commits: ListPanel<Commit>,
+    /// Il log letto dal repository, nell'ordine in cui `Repo::commits`
+    /// lo restituisce, e lo stato della working copy al momento della
+    /// lettura: insieme determinano le righe di `history`.
+    ///
+    /// I tre campi sono privati e si cambiano solo da `set_history`, che
+    /// ricompone `history`: se fossero scrivibili dall'esterno, tenerli
+    /// coerenti tornerebbe a dipendere da chi scrive `update`, che è
+    /// esattamente ciò che `ListPanel` ha tolto di mezzo per le liste.
+    commits: Vec<Commit>,
+    /// Se la working copy ha modifiche non committate. Deciso leggendo il
+    /// repository, **non** guardando il pannello Changes: quel pannello
+    /// mostra i file della working copy oggi, ma è destinato a mostrare
+    /// anche quelli di un commit selezionato, e la riga in cima a History
+    /// non deve dipendere da cosa si sta guardando.
+    working_copy_dirty: bool,
+    /// Le righe del pannello History: i commit, preceduti dallo stato non
+    /// committato quando c'è.
+    history: ListPanel<HistoryEntry>,
     pub(crate) files: ListPanel<FileEntry>,
     pub(crate) diff: Vec<String>,
     pub(crate) diff_scroll: u16,
@@ -227,7 +261,9 @@ impl Model {
             focus: Panel::History,
             local_branches: ListPanel::default(),
             remote_branches: ListPanel::default(),
-            commits: ListPanel::default(),
+            commits: Vec::new(),
+            working_copy_dirty: false,
+            history: ListPanel::default(),
             files: ListPanel::default(),
             diff: Vec::new(),
             diff_scroll: 0,
@@ -251,7 +287,7 @@ impl Model {
         match panel {
             Panel::Branches => PanelContent::Branches(&mut self.local_branches),
             Panel::Remotes => PanelContent::Branches(&mut self.remote_branches),
-            Panel::History => PanelContent::Commits(&mut self.commits),
+            Panel::History => PanelContent::History(&mut self.history),
             Panel::Changes => PanelContent::Files(&mut self.files),
             Panel::Diff => PanelContent::Diff {
                 lines: &self.diff,
@@ -259,6 +295,43 @@ impl Model {
                 viewport: self.diff_viewport,
             },
         }
+    }
+
+    /// L'unico ingresso per ciò che il pannello History mostra: registra
+    /// il log e lo stato della working copy, e ricompone le righe. I due
+    /// dati arrivano da letture distinte e, più avanti, in momenti
+    /// distinti; passando tutti da qui non esiste un modo di cambiarne uno
+    /// lasciando le righe come stavano.
+    fn set_history(&mut self, commits: Vec<Commit>, working_copy_dirty: bool) {
+        self.commits = commits;
+        self.working_copy_dirty = working_copy_dirty;
+        self.rebuild_history();
+    }
+
+    /// Ricompone le righe del pannello History: i commit del log,
+    /// preceduti dalla riga dello stato non committato quando la working
+    /// copy ha modifiche. Senza modifiche quella riga non esiste affatto,
+    /// invece di comparire vuota.
+    ///
+    /// Come per ogni lista sostituita, il cursore torna in cima: le righe
+    /// sono nuove e la precedente poteva non esserci più.
+    fn rebuild_history(&mut self) {
+        let mut entries = Vec::with_capacity(self.commits.len() + 1);
+        if self.working_copy_dirty {
+            entries.push(HistoryEntry::WorkingCopy);
+        }
+        // I commit vengono clonati: `commits` resta il log così com'è
+        // stato letto, `history` è la lista derivata. Il backend reale ne
+        // carica al più qualche centinaio, non l'intero repository.
+        entries.extend(self.commits.iter().cloned().map(HistoryEntry::Commit));
+        self.history.set(entries);
+    }
+
+    /// Le righe di History, per i test che le ispezionano da fuori: la
+    /// lista è derivata, quindi si legge e non si scrive.
+    #[cfg(test)]
+    pub(crate) fn history(&self) -> &ListPanel<HistoryEntry> {
+        &self.history
     }
 
     /// L'overlay in cima allo stack, se è un dialog.
@@ -440,8 +513,13 @@ fn apply_loaded(
     let (local, remote) = split_branches(branches);
     model.local_branches.set(local);
     model.remote_branches.set(remote);
-    model.commits.set(commits);
+    // `files` è ciò che `Repo::files` ha letto dalla working copy: è qui,
+    // al caricamento, che si decide se ci sono modifiche non committate.
+    // Chiederlo più tardi al pannello Changes legherebbe la riga in cima a
+    // History a ciò che quel pannello sta mostrando.
+    let working_copy_dirty = !files.is_empty();
     model.files.set(files);
+    model.set_history(commits, working_copy_dirty);
     model.diff = diff;
     model.diff_scroll = 0;
 }
@@ -684,6 +762,26 @@ pub(crate) fn model_for_tests() -> Model {
         let msg = effects::run(cmd, &mut repo);
         update(&mut model, msg);
     }
+    model
+}
+
+/// Come `model_for_tests`, ma con una working copy pulita: nessun file
+/// modificato, quindi History mostra i soli commit.
+#[cfg(test)]
+pub(crate) fn model_without_changes_for_tests() -> Model {
+    use crate::git::repo::Repo;
+
+    let mut model = model_for_tests();
+    let repo = crate::git::mock::MockGitRepo::new();
+    update(
+        &mut model,
+        Msg::Loaded {
+            branches: repo.branches(),
+            commits: repo.commits(),
+            files: Vec::new(),
+            diff: repo.diff(),
+        },
+    );
     model
 }
 
@@ -1090,6 +1188,199 @@ mod tests {
         );
     }
 
+    /// Un commit sintetico: i test su History guardano la forma della
+    /// lista, non il contenuto dei singoli commit.
+    fn commit(hash: &str) -> Commit {
+        Commit {
+            graph: "*".to_string(),
+            hash: hash.to_string(),
+            msg: format!("commit {hash}"),
+            author: "Tester".to_string(),
+        }
+    }
+
+    fn modified_file(path: &str) -> FileEntry {
+        FileEntry {
+            path: path.to_string(),
+            status: crate::git::domain::FileStatus::Modified,
+            staged: false,
+        }
+    }
+
+    /// Rimpiazza i dati caricati, come farebbe l'esito di `Cmd::LoadAll`.
+    fn load(app: &mut TestApp, commits: Vec<Commit>, files: Vec<FileEntry>) {
+        update(
+            &mut app.model,
+            Msg::Loaded {
+                branches: Vec::new(),
+                commits,
+                files,
+                diff: Vec::new(),
+            },
+        );
+    }
+
+    fn history_hashes(app: &TestApp) -> Vec<&str> {
+        app.history
+            .items()
+            .iter()
+            .filter_map(|e| match e {
+                HistoryEntry::WorkingCopy => None,
+                HistoryEntry::Commit(c) => Some(c.hash.as_str()),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn history_shows_the_uncommitted_row_only_when_the_working_copy_has_changes() {
+        let mut app = TestApp::new();
+        // I dati di partenza hanno file modificati.
+        assert!(matches!(
+            app.history.items().first(),
+            Some(HistoryEntry::WorkingCopy)
+        ));
+        assert_eq!(app.history.len(), app.commits.len() + 1);
+
+        load(
+            &mut app,
+            vec![commit("aaa1111"), commit("bbb2222")],
+            Vec::new(),
+        );
+        assert_eq!(history_hashes(&app), ["aaa1111", "bbb2222"]);
+        assert!(
+            !app.history
+                .items()
+                .iter()
+                .any(|e| matches!(e, HistoryEntry::WorkingCopy)),
+            "senza modifiche la riga non deve esistere, nemmeno vuota"
+        );
+
+        load(
+            &mut app,
+            vec![commit("aaa1111")],
+            vec![modified_file("src/main.rs")],
+        );
+        assert!(matches!(
+            app.history.items().first(),
+            Some(HistoryEntry::WorkingCopy)
+        ));
+        assert_eq!(history_hashes(&app), ["aaa1111"]);
+
+        // Modifiche in un repository senza commit: la riga è tutta la lista.
+        load(&mut app, Vec::new(), vec![modified_file("src/main.rs")]);
+        assert_eq!(app.history.len(), 1);
+        assert_eq!(app.history.selected_index(), Some(0));
+    }
+
+    /// Il cursore percorre la riga non committata e i commit come un'unica
+    /// lista: la selezione di History non è un indice in `Model::commits`.
+    #[test]
+    fn the_history_cursor_walks_the_uncommitted_row_and_the_commits_together() {
+        let mut app = TestApp::new();
+        load(
+            &mut app,
+            vec![commit("aaa1111"), commit("bbb2222")],
+            vec![modified_file("src/main.rs")],
+        );
+        app.focus = Panel::History;
+
+        assert!(matches!(
+            app.history.selected(),
+            Some(HistoryEntry::WorkingCopy)
+        ));
+
+        press(&mut app, KeyCode::Down);
+        assert!(
+            matches!(app.history.selected(), Some(HistoryEntry::Commit(c)) if c.hash == "aaa1111")
+        );
+        press(&mut app, KeyCode::Down);
+        assert!(
+            matches!(app.history.selected(), Some(HistoryEntry::Commit(c)) if c.hash == "bbb2222")
+        );
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.history.selected_index(), Some(2), "ultima riga");
+
+        for _ in 0..5 {
+            press(&mut app, KeyCode::Up);
+        }
+        assert!(matches!(
+            app.history.selected(),
+            Some(HistoryEntry::WorkingCopy)
+        ));
+    }
+
+    /// Ricaricare sostituisce le righe di History e riporta il cursore in
+    /// cima, anche se era su un commit: le righe sono nuove e quella
+    /// selezionata può non esserci più. Chi vorrà ritrovare la selezione
+    /// dovrà ancorarla all'identità della riga, non all'indice.
+    #[test]
+    fn reloading_brings_the_history_cursor_back_to_the_top() {
+        let mut app = TestApp::new();
+        app.focus = Panel::History;
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.history.selected_index(), Some(2));
+
+        load(
+            &mut app,
+            vec![commit("aaa1111"), commit("bbb2222")],
+            vec![modified_file("src/main.rs")],
+        );
+        assert_eq!(app.history.selected_index(), Some(0));
+        assert!(matches!(
+            app.history.selected(),
+            Some(HistoryEntry::WorkingCopy)
+        ));
+    }
+
+    /// La riga in cima dipende dalla working copy letta al caricamento,
+    /// non dal contenuto del pannello Changes: svuotare quel pannello non
+    /// deve far sparire la riga, né riempirlo farla comparire.
+    #[test]
+    fn the_uncommitted_row_does_not_follow_the_changes_panel() {
+        let mut app = TestApp::new();
+        load(
+            &mut app,
+            vec![commit("aaa1111")],
+            vec![modified_file("src/main.rs")],
+        );
+        assert!(matches!(
+            app.history.items().first(),
+            Some(HistoryEntry::WorkingCopy)
+        ));
+
+        app.files.set(Vec::new());
+        app.rebuild_history();
+        assert!(
+            matches!(app.history.items().first(), Some(HistoryEntry::WorkingCopy)),
+            "la working copy è ancora sporca: la riga resta"
+        );
+
+        load(&mut app, vec![commit("aaa1111")], Vec::new());
+        app.files.set(vec![modified_file("src/main.rs")]);
+        app.rebuild_history();
+        assert!(
+            !app.history
+                .items()
+                .iter()
+                .any(|e| matches!(e, HistoryEntry::WorkingCopy)),
+            "riempire il pannello Changes non committa nulla"
+        );
+    }
+
+    #[test]
+    fn an_empty_history_has_no_selection_and_moving_does_not_panic() {
+        let mut app = TestApp::new();
+        load(&mut app, Vec::new(), Vec::new());
+        assert!(app.history.is_empty());
+        assert_eq!(app.history.selected_index(), None);
+
+        app.focus = Panel::History;
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.history.selected_index(), None);
+    }
+
     #[test]
     fn unimplemented_items_report_it() {
         let mut app = TestApp::new();
@@ -1116,13 +1407,13 @@ mod tests {
         app.focus = Panel::Diff;
         press(&mut app, KeyCode::Down);
         assert_eq!(app.diff_scroll, 1);
-        assert_eq!(app.commits.selected_index(), Some(0));
+        assert_eq!(app.history.selected_index(), Some(0));
         assert_eq!(app.files.selected_index(), Some(0));
 
         app.focus = Panel::Changes;
         press(&mut app, KeyCode::Down);
         assert_eq!(app.files.selected_index(), Some(1));
-        assert_eq!(app.commits.selected_index(), Some(0));
+        assert_eq!(app.history.selected_index(), Some(0));
     }
 
     #[test]

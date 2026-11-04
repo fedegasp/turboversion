@@ -81,6 +81,15 @@ pub(crate) fn button(focused: bool) -> Style {
     }
 }
 
+/// La riga dello stato non committato in cima al pannello History. Bianco
+/// pieno e grassetto contro il giallo del log: la riga si stacca dai
+/// commit anche a colpo d'occhio, oltre che per le colonne del grafo e
+/// dell'hash lasciate vuote. Nessuno sfondo, così l'evidenziazione della
+/// selezione lo sostituisce e il grassetto sopravvive.
+pub(crate) fn uncommitted() -> Style {
+    Style::new().fg(Color::White).add_modifier(Modifier::BOLD)
+}
+
 /// Ombra portata: le celle sotto restano, ma scurite.
 pub(crate) fn shadow() -> Style {
     Style::new().fg(Color::DarkGray).bg(Color::Black)

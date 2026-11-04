@@ -14,7 +14,10 @@ changes and diff, all visible at once, navigable entirely from the keyboard.
 > it picks up the repository containing the current directory and exits
 > with an error if there isn't one. Local and remote-tracking branches live
 > in two separate panels; tags are still read from the repository (the
-> branch-name validation needs them) but aren't shown in any panel.
+> branch-name validation needs them) but aren't shown in any panel. When the
+> working copy has changes, History shows an "Uncommitted changes" row above
+> the log — selecting it doesn't change the other panels yet: Changes always
+> lists the working copy and Diff always shows the whole repository.
 > Creating and deleting local branches writes to the repository for real;
 > staging and commits don't yet. `src/git/mock.rs` is now test-only fixture
 > data.
@@ -24,9 +27,10 @@ changes and diff, all visible at once, navigable entirely from the keyboard.
 ```
 ┌File─Branch─Commit─View─Help──────────────────────────────────────────────┐
 ╔ Branches ════╗╔ History ═════════════════════════════════════════════════╗
-║ * main       ║║ ●─╮ a1b2c3d Merge feature/menu               Mario      ║
-║   develop    ║║ │ ● d4e5f6a Add dropdown menu                Luca       ║
-║   feature/.. ║║ │ ● 9f8e7d6 Add menubar widget               Luca       ║
+║ * main       ║║             Uncommitted changes                         ║
+║   develop    ║║ ●─╮ a1b2c3d Merge feature/menu               Mario      ║
+║   feature/.. ║║ │ ● d4e5f6a Add dropdown menu                Luca       ║
+║              ║║ │ ● 9f8e7d6 Add menubar widget               Luca       ║
 ║              ║║ ●─╯ c0ffee1 Fix status bar                   Mario      ║
 ╚══════════════╝╚══════════════════════════════════════════════════════════╝
 ┌ Remotes ─────┐┌ Changes ═══════════┐┌ Diff ══════════════════════════════┐
@@ -52,6 +56,10 @@ Vision touches.
   panels on screen together — local branches and remote-tracking branches
   each get their own panel, sharing the left column — automatically
   collapsing to a single focused panel on narrow terminals (< 80 columns).
+- **Uncommitted changes in the log**: when the working copy is dirty, the
+  History panel lists it as its first row, with the graph, hash and author
+  columns left empty — so it reads as "not committed yet" even without
+  colors. With a clean working copy the row isn't there at all.
 - **Keyboard-driven UX**: panel switching, list navigation, stage checkbox
   toggle (display only so far — see Status), diff scrolling — scrolling
   stops with the last line of the diff at the bottom of the panel, instead
@@ -72,6 +80,9 @@ Vision touches.
       `Help > About`, `Branch > New branch...` and `Branch > Delete` (both
       now change the repository for real); the rest show a "not available
       yet" dialog.
+- [x] Show the uncommitted working copy on top of the history.
+- [ ] Make Changes and Diff follow the History selection: the working copy
+      for the uncommitted row, the files and diff of the commit otherwise.
 - [ ] Stage/unstage and commit from the UI.
 - [x] Branch creation/deletion (local branches). Checkout still missing.
 - [ ] Repository picker (`File > Open repository...`, `Clone...`).
@@ -121,6 +132,9 @@ cargo test
 > where it is refused with a message instead of deleting a local branch you
 > weren't looking at.
 
+> **Note:** the History selection is reset to the top row whenever the
+> repository is read again, so it doesn't survive a reload yet.
+
 > **Note:** the Diff panel does not wrap long lines: it cuts them at the
 > right edge, like `less -S`. There is no horizontal scrolling, so the tail
 > of a line wider than the panel can't be read.
@@ -145,7 +159,8 @@ boundary towards git (the `Repo` trait). See
 src/
 ├── main.rs          Terminal setup/teardown, entry point
 ├── app.rs            Model, update() and the main loop; Model::content_mut(),
-│                     the single "panel -> data" table
+│                     the single "panel -> data" table; HistoryEntry, the
+│                     History rows (the commits, plus the uncommitted one)
 ├── list_panel.rs     ListPanel<T>: a list's items and its cursor as one value,
 │                     keeping the selection valid (or None on an empty list)
 ├── msg.rs            Msg (incoming events) and Cmd (requested effects)

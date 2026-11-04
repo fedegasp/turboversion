@@ -15,23 +15,23 @@
 //! Questo modulo dice *quali dati* mostra un pannello; i pannelli dicono
 //! *come appaiono*.
 //!
-//! Il modulo esiste per due ragioni, nessuna delle quali è "qui i tipi
-//! reggeranno senza modifiche": `Rows` andrà riscritto appena un pannello
-//! mostrerà qualcosa che non è una riga del `Model` (la riga dello stato
-//! non committato in cima a History non è un `Commit`, e nessuno `&[Commit]`
-//! può contenerla).
+//! Oggi il modulo si regge su una ragione sola: **la riduzione di
+//! capacità**. A `ui/` arrivano `(&[T], &mut ListState)`, non
+//! `&mut ListPanel<T>`: il rendering può leggere gli elementi e muovere il
+//! cursore, ma non ha modo di chiamare `set`, `retain` o `push_selected`.
+//! "Solo `update` muta il Model" smette di essere una disciplina da
+//! ricordare e diventa una proprietà dei tipi.
 //!
-//! 1. **Riduzione di capacità.** A `ui/` arrivano `(&[T], &mut ListState)`,
-//!    non `&mut ListPanel<T>`: il rendering può leggere gli elementi e
-//!    muovere il cursore, ma non ha modo di chiamare `set`, `retain` o
-//!    `push_selected`. "Solo `update` muta il Model" smette di essere una
-//!    disciplina da ricordare e diventa una proprietà dei tipi.
-//! 2. **Un tipo view-facing separato da quello update-facing.** Quando il
-//!    pannello History dovrà mostrare anche righe sintetiche, a cambiare
-//!    saranno la variante di `Rows` e `panels::history`; `PanelContent`,
-//!    che serve a `update` e non ha bisogno di quelle righe, resterà
-//!    com'è. Senza questo strato la stessa modifica dovrebbe passare dal
-//!    `Model`.
+//! Una seconda ragione era scritta qui — "un tipo view-facing separato da
+//! quello update-facing, così una riga in più in un pannello non tocca il
+//! lato `update`" — e si è rivelata falsa alla prima prova. Quando History
+//! ha dovuto mostrare anche lo stato non committato sono cambiate entrambe
+//! le parti, sullo stesso tipo nuovo: `PanelContent::Commits` è diventata
+//! `PanelContent::History` e `Rows::Commits` è diventata `Rows::History`,
+//! entrambe su `HistoryEntry`, che vive nel `Model`. Non poteva andare
+//! altrimenti: il cursore di una lista sta nel `Model` e conta le righe
+//! disegnate, quindi il tipo di riga deve essere quello che `update`
+//! possiede. Una riga sintetizzata qui sfaserebbe cursore e righe.
 //!
 //! I `ListState` restano del `Model` e vengono presi in prestito: ratatui
 //! ci tiene anche l'offset di scorrimento, calcolato mentre disegna, che
@@ -42,14 +42,18 @@ use std::borrow::Cow;
 
 use ratatui::widgets::ListState;
 
-use crate::app::{Model, Panel, PanelContent};
-use crate::git::domain::{Branch, Commit, FileEntry};
+use crate::app::{HistoryEntry, Model, Panel, PanelContent};
+use crate::git::domain::{Branch, FileEntry};
 
 /// Ciò che un pannello deve disegnare: i dati già tipizzati, più il
 /// cursore con cui scorrerli.
 pub(crate) enum Rows<'a> {
     Branches(&'a [Branch], &'a mut ListState),
-    Commits(&'a [Commit], &'a mut ListState),
+    /// Le righe del pannello History: commit, più l'eventuale riga dello
+    /// stato non committato. Quale sia la prima riga lo decide `update`
+    /// (vedi `Model`), non il rendering: il cursore della lista e le righe
+    /// disegnate restano così lo stesso indice.
+    History(&'a [HistoryEntry], &'a mut ListState),
     Files(&'a [FileEntry], &'a mut ListState),
     /// Lo scorrimento del diff arriva per valore, non come `&mut` come i
     /// `ListState` delle liste: quelli ratatui li aggiorna mentre disegna
@@ -104,9 +108,9 @@ pub(crate) fn rows(model: &mut Model, panel: Panel) -> Rows<'_> {
             let (items, state) = list.parts_mut();
             Rows::Branches(items, state)
         }
-        PanelContent::Commits(list) => {
+        PanelContent::History(list) => {
             let (items, state) = list.parts_mut();
-            Rows::Commits(items, state)
+            Rows::History(items, state)
         }
         PanelContent::Files(list) => {
             let (items, state) = list.parts_mut();
@@ -121,7 +125,7 @@ pub(crate) fn rows(model: &mut Model, panel: Panel) -> Rows<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::model_for_tests;
+    use crate::app::{model_for_tests, model_without_changes_for_tests};
 
     /// Nome del primo elemento disegnato da ciascun pannello di rami: se i
     /// due pannelli pescassero dalla lista sbagliata, qui comparirebbe un
@@ -142,7 +146,7 @@ mod tests {
         assert_eq!(first_branch(&mut model, Panel::Remotes), "origin/main");
         assert!(matches!(
             rows(&mut model, Panel::History),
-            Rows::Commits(..)
+            Rows::History(..)
         ));
         assert!(matches!(rows(&mut model, Panel::Changes), Rows::Files(..)));
         assert!(matches!(rows(&mut model, Panel::Diff), Rows::Diff(..)));
@@ -162,6 +166,36 @@ mod tests {
             panic!("Branches deve mostrare una lista di rami");
         };
         assert_eq!(state.selected(), Some(0), "il cursore dei locali");
+    }
+
+    /// Il pannello History riceve le righe così come il `Model` le tiene,
+    /// riga non committata compresa: nessuna riga viene sintetizzata qui,
+    /// altrimenti il cursore (che è del `Model`) conterebbe righe diverse
+    /// da quelle disegnate.
+    #[test]
+    fn the_history_panel_receives_the_rows_the_model_holds() {
+        let mut model = model_for_tests();
+        let expected = model.history().len();
+        assert!(
+            !model.files.is_empty(),
+            "i dati di partenza hanno modifiche"
+        );
+
+        let Rows::History(items, state) = rows(&mut model, Panel::History) else {
+            panic!("History deve mostrare le sue righe");
+        };
+        assert_eq!(items.len(), expected);
+        assert!(matches!(items.first(), Some(HistoryEntry::WorkingCopy)));
+        assert_eq!(state.selected(), Some(0), "il cursore di History");
+
+        // Con una working copy pulita restano i soli commit, e la prima
+        // riga torna a essere un commit.
+        let mut model = model_without_changes_for_tests();
+        let Rows::History(items, _) = rows(&mut model, Panel::History) else {
+            panic!("History deve mostrare le sue righe");
+        };
+        assert_eq!(items.len(), expected - 1);
+        assert!(matches!(items.first(), Some(HistoryEntry::Commit(_))));
     }
 
     #[test]
