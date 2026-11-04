@@ -44,6 +44,13 @@ pub(crate) enum Msg {
         c: char,
         is_plain_ctrl: bool,
     },
+    /// Il pannello Diff è stato disegnato alto `0` o più righe, e
+    /// l'altezza è cambiata rispetto a quella nota. Lo emette il ciclo
+    /// principale confrontando l'altezza misurata da `ui::view` con quella
+    /// registrata nel `Model`: così l'altezza del pannello entra nel
+    /// `Model` per la stessa porta di ogni altro evento, e `update` resta
+    /// l'unico a scriverlo.
+    DiffViewport(u16),
     /// Esito di `Cmd::LoadAll`: i dati iniziali letti da `Repo`.
     Loaded {
         branches: Vec<Branch>,

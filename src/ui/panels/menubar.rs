@@ -19,13 +19,6 @@ use crate::app::{MenuState, MENUS};
 use crate::ui::theme;
 use crate::ui::widgets::window::Window;
 
-pub(crate) const MENU_KEYS: &[(&str, &str)] = &[
-    ("←→", "Switch"),
-    ("↑↓", "Select"),
-    ("Enter", "Activate"),
-    ("Esc", "Close"),
-];
-
 pub(crate) fn render_menubar(f: &mut Frame, area: Rect, open: Option<MenuState>) {
     let mut spans = Vec::new();
     for (i, (name, _)) in MENUS.iter().enumerate() {

@@ -16,7 +16,6 @@ use std::time::Duration;
 
 use ratatui::{
     crossterm::event::{self, Event, KeyEventKind},
-    widgets::ListState,
     DefaultTerminal,
 };
 
@@ -26,6 +25,7 @@ use crate::effects;
 use crate::git::domain::{Branch, BranchKind, Commit, FileEntry};
 use crate::git::repo::GitError;
 use crate::input;
+use crate::list_panel::ListPanel;
 use crate::msg::{Cmd, Msg};
 use crate::ui;
 use crate::worker::Worker;
@@ -33,13 +33,20 @@ use crate::worker::Worker;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Panel {
     Branches,
+    Remotes,
     History,
     Changes,
     Diff,
 }
 
 impl Panel {
-    const ALL: [Panel; 4] = [Panel::Branches, Panel::History, Panel::Changes, Panel::Diff];
+    const ALL: [Panel; 5] = [
+        Panel::Branches,
+        Panel::Remotes,
+        Panel::History,
+        Panel::Changes,
+        Panel::Diff,
+    ];
 
     fn index(self) -> usize {
         self as usize
@@ -53,6 +60,7 @@ impl Panel {
     pub(crate) fn title(self) -> &'static str {
         match self {
             Panel::Branches => "Branches",
+            Panel::Remotes => "Remotes",
             Panel::History => "History",
             Panel::Changes => "Changes",
             Panel::Diff => "Diff",
@@ -129,17 +137,86 @@ pub(crate) enum Overlay {
     Dialog(Dialog),
 }
 
+/// Il contenuto di un pannello: la lista che mostra, insieme al cursore
+/// che la percorre, oppure le righe del diff con il suo scorrimento.
+///
+/// È l'unico posto in cui si stabilisce quale pannello mostra quale dato.
+/// Prima la stessa tabella era scritta due volte — in `step`, per muovere
+/// il cursore del pannello a fuoco, e in `ui::draw_panel`, per disegnarlo —
+/// e le due copie potevano divergere in silenzio. "Branches" e "Remotes"
+/// collassano nella stessa variante: elencano entrambi rami e si muovono e
+/// si disegnano allo stesso modo, solo su liste diverse.
+pub(crate) enum PanelContent<'a> {
+    Branches(&'a mut ListPanel<Branch>),
+    Commits(&'a mut ListPanel<Commit>),
+    Files(&'a mut ListPanel<FileEntry>),
+    /// Il pannello Diff non è una lista con selezione: scorre per righe.
+    /// `viewport` è l'altezza con cui il pannello è stato disegnato
+    /// l'ultima volta, e serve solo a fermare lo scorrimento quando
+    /// l'ultima riga arriva in fondo; arriva per valore perché nessuno,
+    /// oltre a `ui`, deve poterla cambiare.
+    Diff {
+        lines: &'a [String],
+        scroll: &'a mut u16,
+        viewport: u16,
+    },
+}
+
+impl PanelContent<'_> {
+    /// Muove di `delta` righe ciò che il pannello mostra: il cursore della
+    /// lista, o lo scorrimento del diff.
+    fn step(&mut self, delta: i32) {
+        match self {
+            Self::Branches(list) => list.step(delta),
+            Self::Commits(list) => list.step(delta),
+            Self::Files(list) => list.step(delta),
+            Self::Diff {
+                lines,
+                scroll,
+                viewport,
+            } => {
+                let max = i32::from(max_diff_scroll(lines.len(), *viewport));
+                **scroll = (i32::from(**scroll) + delta).clamp(0, max) as u16;
+            }
+        }
+    }
+}
+
+/// Lo scorrimento massimo del pannello Diff: oltre questo valore l'ultima
+/// riga del diff starebbe sopra il fondo del pannello, lasciando spazio
+/// vuoto sotto.
+///
+/// `viewport` a 0 vuol dire "altezza non ancora nota": capita al primo
+/// frame, prima che il pannello venga disegnato. In quel caso si conta una
+/// riga visibile, cioè si ricade sul limite per riga (`len - 1`): scorrere
+/// resta possibile e il valore non può comunque uscire dal diff: appena il
+/// pannello viene disegnato arriva un `Msg::DiffViewport` e il limite vero
+/// entra in vigore, riportando lo scorrimento nei ranghi.
+fn max_diff_scroll(lines: usize, viewport: u16) -> u16 {
+    let visible = usize::from(viewport).max(1);
+    // Il minimo con `u16::MAX` evita che un diff enorme (oltre 65 536
+    // righe, un file generato ci arriva) tronchi il massimo a un valore
+    // più piccolo dello scorrimento corrente, facendo saltare il diff in
+    // cima; `u16` è anche il tipo che `Paragraph::scroll` accetta.
+    lines.saturating_sub(visible).min(usize::from(u16::MAX)) as u16
+}
+
 pub(crate) struct Model {
     pub(crate) running: bool,
     pub(crate) focus: Panel,
-    pub(crate) branches: ListState,
-    pub(crate) branch_list: Vec<Branch>,
-    pub(crate) history: ListState,
-    pub(crate) commits: Vec<Commit>,
-    pub(crate) changes: ListState,
-    pub(crate) diff_scroll: u16,
+    pub(crate) local_branches: ListPanel<Branch>,
+    pub(crate) remote_branches: ListPanel<Branch>,
+    pub(crate) commits: ListPanel<Commit>,
+    pub(crate) files: ListPanel<FileEntry>,
     pub(crate) diff: Vec<String>,
-    pub(crate) files: Vec<FileEntry>,
+    pub(crate) diff_scroll: u16,
+    /// Righe visibili nel pannello Diff nell'ultimo frame disegnato: il
+    /// limite dello scorrimento dipende da quante righe ci stanno. Lo
+    /// misura `ui`, che è l'unico a conoscere il layout, ma arriva qui come
+    /// `Msg::DiffViewport` (vedi `run`), non scritto da chi disegna: il
+    /// `Model` lo cambia solo `update`. Vale 0 finché il pannello non è
+    /// stato disegnato nemmeno una volta.
+    pub(crate) diff_viewport: u16,
     pub(crate) overlays: Vec<Overlay>,
 }
 
@@ -148,15 +225,39 @@ impl Model {
         Self {
             running: true,
             focus: Panel::History,
-            branches: ListState::default(),
-            branch_list: Vec::new(),
-            history: ListState::default(),
-            commits: Vec::new(),
-            changes: ListState::default(),
-            diff_scroll: 0,
+            local_branches: ListPanel::default(),
+            remote_branches: ListPanel::default(),
+            commits: ListPanel::default(),
+            files: ListPanel::default(),
             diff: Vec::new(),
-            files: Vec::new(),
+            diff_scroll: 0,
+            diff_viewport: 0,
             overlays: Vec::new(),
+        }
+    }
+
+    /// Il contenuto del pannello `panel`, prestato dal `Model`: vedi
+    /// `PanelContent`. Lo usano sia `update` (per muovere il cursore del
+    /// pannello a fuoco) sia `ui::view_model` (per sapere cosa disegnare),
+    /// così la corrispondenza pannello -> dati resta scritta una volta
+    /// sola. Il prestito è esclusivo perché il rendering di ratatui
+    /// aggiorna il `ListState` (l'offset di scorrimento) mentre disegna.
+    ///
+    /// È `pub(crate)` perché `ui` ne ha bisogno, ma da lì l'unico chiamante
+    /// ammesso è `ui::view_model`: un pannello che lo invocasse
+    /// direttamente otterrebbe un `&mut ListPanel` e potrebbe modificare il
+    /// `Model` mentre disegna.
+    pub(crate) fn content_mut(&mut self, panel: Panel) -> PanelContent<'_> {
+        match panel {
+            Panel::Branches => PanelContent::Branches(&mut self.local_branches),
+            Panel::Remotes => PanelContent::Branches(&mut self.remote_branches),
+            Panel::History => PanelContent::Commits(&mut self.commits),
+            Panel::Changes => PanelContent::Files(&mut self.files),
+            Panel::Diff => PanelContent::Diff {
+                lines: &self.diff,
+                scroll: &mut self.diff_scroll,
+                viewport: self.diff_viewport,
+            },
         }
     }
 
@@ -214,8 +315,16 @@ pub(crate) fn run(
     worker: &Worker,
     terminal: &mut DefaultTerminal,
 ) -> io::Result<()> {
+    // L'altezza del pannello Diff la conosce solo chi calcola il layout.
+    // Vive qui, fuori dal `Model`, e rientra come `Msg` quando cambia:
+    // disegnare non scrive nel `Model`.
+    let mut diff_viewport = model.diff_viewport;
+
     while model.running {
-        terminal.draw(|f| ui::view(f, model))?;
+        terminal.draw(|f| ui::view(f, model, &mut diff_viewport))?;
+        if diff_viewport != model.diff_viewport {
+            dispatch(model, worker, Msg::DiffViewport(diff_viewport));
+        }
 
         if event::poll(POLL_TIMEOUT)? {
             if let Event::Key(key) = event::read()? {
@@ -253,6 +362,10 @@ pub(crate) fn update(model: &mut Model, msg: Msg) -> Vec<Cmd> {
         }
         Msg::OpenMenuByHotkey(c) => {
             open_menu_by_hotkey(model, c);
+            Vec::new()
+        }
+        Msg::DiffViewport(height) => {
+            apply_diff_viewport(model, height);
             Vec::new()
         }
         Msg::Loaded {
@@ -306,6 +419,17 @@ fn open_menu_by_hotkey(model: &mut Model, c: char) {
     }
 }
 
+/// Registra l'altezza del pannello Diff e riporta subito lo scorrimento
+/// entro il nuovo limite: ingrandendo il terminale, uno scorrimento che
+/// prima era al fondo lascerebbe altrimenti righe vuote sotto l'ultima riga
+/// del diff fino al tasto successivo.
+fn apply_diff_viewport(model: &mut Model, height: u16) {
+    model.diff_viewport = height;
+    model.diff_scroll = model
+        .diff_scroll
+        .min(max_diff_scroll(model.diff.len(), height));
+}
+
 fn apply_loaded(
     model: &mut Model,
     branches: Vec<Branch>,
@@ -313,26 +437,42 @@ fn apply_loaded(
     files: Vec<FileEntry>,
     diff: Vec<String>,
 ) {
-    model.branch_list = branches;
-    model.branches = ListState::default().with_selected(Some(0));
-    model.commits = commits;
-    model.history = ListState::default().with_selected(Some(0));
-    model.files = files;
-    model.changes = ListState::default().with_selected(Some(0));
+    let (local, remote) = split_branches(branches);
+    model.local_branches.set(local);
+    model.remote_branches.set(remote);
+    model.commits.set(commits);
+    model.files.set(files);
     model.diff = diff;
     model.diff_scroll = 0;
+}
+
+/// Divide i riferimenti restituiti da `Repo::branches` nelle due liste che
+/// la UI mostra. I tag esistono nel dominio e i backend continuano a
+/// restituirli (la validazione dei nomi duplicati si appoggia alla lista
+/// completa), ma non hanno un pannello: qui vengono scartati.
+fn split_branches(branches: Vec<Branch>) -> (Vec<Branch>, Vec<Branch>) {
+    let mut local = Vec::new();
+    let mut remote = Vec::new();
+    for b in branches {
+        match b.kind {
+            BranchKind::Local => local.push(b),
+            BranchKind::Remote => remote.push(b),
+            BranchKind::Tag => {}
+        }
+    }
+    (local, remote)
 }
 
 fn apply_branch_created(model: &mut Model, name: String, result: Result<Branch, GitError>) {
     match result {
         Ok(branch) => {
-            // Aggiornamento locale invece di una ricarica dal repository:
-            // il ramo finisce in fondo alla lista, quindi dopo i tag,
-            // mentre una rilettura lo collocherebbe tra i locali. È una
-            // divergenza solo di ordinamento, che sparirà quando l'esito Ok
-            // potrà chiedere una ricarica completa.
-            model.branch_list.push(branch);
-            model.branches.select(Some(model.branch_list.len() - 1));
+            // Aggiornamento locale invece di una ricarica dal
+            // repository: il ramo finisce in coda ai locali, mentre una
+            // rilettura lo collocherebbe nell'ordine in cui il repository
+            // elenca i suoi riferimenti. È una divergenza solo di
+            // ordinamento, che sparirà quando l'esito Ok potrà chiedere una
+            // ricarica completa.
+            model.local_branches.push_selected(branch);
         }
         Err(err) => {
             // Riapre il dialog con il testo già digitato, invece di un
@@ -352,14 +492,10 @@ fn apply_branch_created(model: &mut Model, name: String, result: Result<Branch, 
 fn apply_branch_deleted(model: &mut Model, name: String, result: Result<(), GitError>) {
     match result {
         Ok(()) => {
-            // Il confronto è sul solo nome: se esistono insieme un ramo
-            // locale e un tag omonimi (creabili fuori dall'app), dalla
-            // lista sparisce anche il tag, che nel repository c'è ancora.
-            // Anche questo si chiude con una ricarica dopo l'esito Ok.
-            model.branch_list.retain(|b| b.name != name);
-            let last = model.branch_list.len().checked_sub(1);
-            let sel = model.branches.selected().zip(last).map(|(s, l)| s.min(l));
-            model.branches.select(sel);
+            // Aggiornamento locale invece di una ricarica: la lista
+            // contiene solo rami locali, e i loro nomi sono unici, quindi
+            // il confronto per nome toglie esattamente il ramo cancellato.
+            model.local_branches.retain(|b| b.name != name);
         }
         Err(err) => {
             model.overlays.push(Overlay::Dialog(Dialog::info(
@@ -456,12 +592,21 @@ fn activate(model: &mut Model, label: &str, action: MenuAction) {
     }
 }
 
+/// Chiede conferma per cancellare il ramo selezionato nel pannello
+/// "Branches". L'operazione guarda sempre quella selezione, anche con il
+/// focus altrove, come è normale per una voce di menu. L'eccezione è
+/// "Remotes": è l'altro pannello che elenca rami, quindi è l'unico in cui
+/// "Delete" sarebbe ambiguo su quale dei due elenchi stia agendo. Lì si
+/// rifiuta invece di cancellare un ramo a cui l'utente non stava pensando.
 fn ask_delete_branch(model: &mut Model) {
-    let Some(b) = model
-        .branches
-        .selected()
-        .and_then(|i| model.branch_list.get(i))
-    else {
+    if model.focus == Panel::Remotes {
+        model.overlays.push(Overlay::Dialog(Dialog::info(
+            "Delete branch",
+            "Remote branches cannot be deleted here.",
+        )));
+        return;
+    }
+    let Some(b) = model.local_branches.selected() else {
         model.overlays.push(Overlay::Dialog(Dialog::info(
             "Delete branch",
             "No branch selected.",
@@ -472,14 +617,6 @@ fn ask_delete_branch(model: &mut Model) {
         Dialog::info(
             "Delete branch",
             format!("Cannot delete the current branch '{}'.", b.name),
-        )
-    } else if b.kind != BranchKind::Local {
-        Dialog::info(
-            "Delete branch",
-            format!(
-                "'{}' is not a local branch and cannot be deleted here.",
-                b.name
-            ),
         )
     } else {
         let mut d = Dialog::confirm(
@@ -512,8 +649,10 @@ fn update_main(model: &mut Model, msg: Msg) -> Vec<Cmd> {
         Msg::Up | Msg::Char { c: 'k', .. } => step(model, -1),
         Msg::Down | Msg::Char { c: 'j', .. } => step(model, 1),
         Msg::Char { c: ' ', .. } if model.focus == Panel::Changes => {
-            if let Some(i) = model.changes.selected() {
-                model.files[i].staged = !model.files[i].staged;
+            // Su una lista vuota non c'è alcun file selezionato (vedi
+            // l'invariante di `ListPanel`): niente da commutare.
+            if let Some(file) = model.files.selected_mut() {
+                file.staged = !file.staged;
             }
         }
         _ => {}
@@ -521,29 +660,17 @@ fn update_main(model: &mut Model, msg: Msg) -> Vec<Cmd> {
     Vec::new()
 }
 
+/// Muove di `delta` righe il pannello a fuoco, qualunque sia il suo
+/// contenuto: quale lista tocchi lo decide `Model::content_mut`, non questa
+/// funzione.
 fn step(model: &mut Model, delta: i32) {
-    match model.focus {
-        Panel::Branches => step_list(&mut model.branches, model.branch_list.len(), delta),
-        Panel::History => {
-            step_list(&mut model.history, model.commits.len(), delta);
-            // Una nuova selezione mostra un commit diverso: lo scroll
-            // del diff precedente non ha più senso.
-            model.diff_scroll = 0;
-        }
-        Panel::Changes => step_list(&mut model.changes, model.files.len(), delta),
-        Panel::Diff => {
-            let max = model.diff.len().saturating_sub(1) as i32;
-            model.diff_scroll = (model.diff_scroll as i32 + delta).clamp(0, max) as u16;
-        }
+    let focus = model.focus;
+    if focus == Panel::History {
+        // Una nuova selezione mostra un commit diverso: lo scroll del diff
+        // precedente non ha più senso.
+        model.diff_scroll = 0;
     }
-}
-
-fn step_list(state: &mut ListState, len: usize, delta: i32) {
-    if len == 0 {
-        return;
-    }
-    let cur = state.selected().unwrap_or(0) as i32;
-    state.select(Some((cur + delta).clamp(0, len as i32 - 1) as usize));
+    model.content_mut(focus).step(delta);
 }
 
 /// Un `Model` popolato con gli stessi dati di un avvio reale (passati
@@ -645,6 +772,16 @@ mod tests {
         panic!("azione {action:?} non trovata in MENUS");
     }
 
+    /// Indice di un ramo locale cercato per nome: i test non dipendono
+    /// così dall'ordine dei dati di partenza.
+    fn local_position(app: &TestApp, name: &str) -> usize {
+        app.local_branches
+            .items()
+            .iter()
+            .position(|b| b.name == name)
+            .unwrap_or_else(|| panic!("ramo locale {name:?} non trovato"))
+    }
+
     fn run_menu_action(app: &mut TestApp, action: MenuAction) {
         let (menu, item) = menu_position(action);
         app.overlays.push(Overlay::Menu(MenuState { menu, item }));
@@ -724,27 +861,27 @@ mod tests {
     #[test]
     fn new_branch_is_created_and_selected() {
         let mut app = TestApp::new();
-        let n = app.branch_list.len();
+        let n = app.local_branches.len();
         run_menu_action(&mut app, MenuAction::NewBranch);
         type_text(&mut app, "  feature/x ");
         press(&mut app, KeyCode::Enter);
 
         assert!(app.dialog().is_none());
-        assert_eq!(app.branch_list.len(), n + 1);
-        assert_eq!(app.branch_list[n].name, "feature/x");
-        assert_eq!(app.branch_list[n].kind, BranchKind::Local);
-        assert_eq!(app.branches.selected(), Some(n));
+        assert_eq!(app.local_branches.len(), n + 1);
+        assert_eq!(app.local_branches.items()[n].name, "feature/x");
+        assert_eq!(app.local_branches.items()[n].kind, BranchKind::Local);
+        assert_eq!(app.local_branches.selected_index(), Some(n));
     }
 
     #[test]
     fn new_branch_cancel_and_validation_keeps_typed_text_for_correction() {
         let mut app = TestApp::new();
-        let n = app.branch_list.len();
+        let n = app.local_branches.len();
 
         run_menu_action(&mut app, MenuAction::NewBranch);
         type_text(&mut app, "abc");
         press(&mut app, KeyCode::Esc);
-        assert_eq!(app.branch_list.len(), n);
+        assert_eq!(app.local_branches.len(), n);
 
         for bad in [
             "",
@@ -774,42 +911,92 @@ mod tests {
 
             press(&mut app, KeyCode::Esc);
             assert!(app.dialog().is_none());
-            assert_eq!(app.branch_list.len(), n);
+            assert_eq!(app.local_branches.len(), n);
         }
     }
 
     #[test]
     fn current_branch_cannot_be_deleted() {
         let mut app = TestApp::new();
-        let n = app.branch_list.len();
+        let n = app.local_branches.len();
         run_menu_action(&mut app, MenuAction::DeleteBranch);
         assert_eq!(app.dialog().unwrap().kind, crate::dialog::Kind::Message);
         press(&mut app, KeyCode::Enter);
-        assert_eq!(app.branch_list.len(), n);
+        assert_eq!(app.local_branches.len(), n);
     }
 
     #[test]
-    fn remote_branches_and_tags_cannot_be_deleted() {
-        let mut app = TestApp::new();
-        let n = app.branch_list.len();
-        for name in ["origin/main", "v0.1.0"] {
-            let i = app.branch_list.iter().position(|b| b.name == name).unwrap();
-            app.branches.select(Some(i));
-            run_menu_action(&mut app, MenuAction::DeleteBranch);
-            assert_eq!(
-                app.dialog().unwrap().kind,
-                crate::dialog::Kind::Message,
-                "{name} non dovrebbe essere cancellabile"
-            );
-            press(&mut app, KeyCode::Enter);
-            assert_eq!(app.branch_list.len(), n);
-        }
+    fn loaded_branches_are_split_by_kind_and_tags_are_dropped() {
+        let app = TestApp::new();
+        assert!(app
+            .local_branches
+            .items()
+            .iter()
+            .all(|b| b.kind == BranchKind::Local));
+        assert!(app
+            .remote_branches
+            .items()
+            .iter()
+            .all(|b| b.kind == BranchKind::Remote));
+        assert!(app
+            .local_branches
+            .items()
+            .iter()
+            .any(|b| b.name == "develop"));
+        assert!(app
+            .remote_branches
+            .items()
+            .iter()
+            .any(|b| b.name == "origin/main"));
+        assert!(app
+            .local_branches
+            .items()
+            .iter()
+            .chain(app.remote_branches.items())
+            .all(|b| b.name != "v0.1.0"));
     }
 
     #[test]
-    fn deleting_with_nothing_selected_shows_a_message_instead_of_doing_nothing_silently() {
+    fn delete_from_the_remotes_panel_is_refused_instead_of_deleting_a_local_branch() {
         let mut app = TestApp::new();
-        app.branches.select(None);
+        let n = app.local_branches.len();
+        app.focus = Panel::Remotes;
+        // Un locale cancellabile resta selezionato nell'altro pannello: la
+        // richiesta non deve ricadere su di lui.
+        let i = local_position(&app, "develop");
+        app.local_branches.select(i);
+
+        run_menu_action(&mut app, MenuAction::DeleteBranch);
+        assert_eq!(app.dialog().unwrap().kind, crate::dialog::Kind::Message);
+        assert!(app
+            .dialog()
+            .unwrap()
+            .text
+            .contains("Remote branches cannot be deleted"));
+        press(&mut app, KeyCode::Enter);
+
+        assert_eq!(app.local_branches.len(), n);
+        assert!(app
+            .local_branches
+            .items()
+            .iter()
+            .any(|b| b.name == "develop"));
+    }
+
+    #[test]
+    fn deleting_without_any_local_branch_shows_a_message_instead_of_doing_nothing_silently() {
+        let mut app = TestApp::new();
+        // "Nessun ramo selezionato" e "nessun ramo" sono ormai la stessa
+        // cosa: `ListPanel` non ammette una lista piena senza selezione.
+        update(
+            &mut app.model,
+            Msg::Loaded {
+                branches: Vec::new(),
+                commits: Vec::new(),
+                files: Vec::new(),
+                diff: Vec::new(),
+            },
+        );
         run_menu_action(&mut app, MenuAction::DeleteBranch);
         assert_eq!(app.dialog().unwrap().kind, crate::dialog::Kind::Message);
         assert!(app.dialog().unwrap().text.contains("No branch selected"));
@@ -818,17 +1005,22 @@ mod tests {
     #[test]
     fn delete_branch_asks_confirmation_defaulting_to_no() {
         let mut app = TestApp::new();
-        let n = app.branch_list.len();
-        app.branches.select(Some(1)); // develop
+        let n = app.local_branches.len();
+        let i = local_position(&app, "develop");
+        app.local_branches.select(i);
 
         run_menu_action(&mut app, MenuAction::DeleteBranch);
         press(&mut app, KeyCode::Enter); // default: No
-        assert_eq!(app.branch_list.len(), n);
+        assert_eq!(app.local_branches.len(), n);
 
         run_menu_action(&mut app, MenuAction::DeleteBranch);
         press(&mut app, KeyCode::Char('y'));
-        assert_eq!(app.branch_list.len(), n - 1);
-        assert!(app.branch_list.iter().all(|b| b.name != "develop"));
+        assert_eq!(app.local_branches.len(), n - 1);
+        assert!(app
+            .local_branches
+            .items()
+            .iter()
+            .all(|b| b.name != "develop"));
     }
 
     #[test]
@@ -840,12 +1032,62 @@ mod tests {
         run_menu_action(&mut app, MenuAction::NewBranch);
         type_text(&mut app, "temp");
         press(&mut app, KeyCode::Enter);
-        let last = app.branch_list.len() - 1;
-        assert_eq!(app.branches.selected(), Some(last));
+        let last = app.local_branches.len() - 1;
+        assert_eq!(app.local_branches.selected_index(), Some(last));
 
         run_menu_action(&mut app, MenuAction::DeleteBranch);
         press(&mut app, KeyCode::Char('y'));
-        assert_eq!(app.branches.selected(), Some(last - 1));
+        assert_eq!(app.local_branches.selected_index(), Some(last - 1));
+    }
+
+    #[test]
+    fn space_on_an_empty_changes_list_does_not_panic() {
+        let mut app = TestApp::new();
+        update(
+            &mut app.model,
+            Msg::Loaded {
+                branches: Vec::new(),
+                commits: Vec::new(),
+                files: Vec::new(),
+                diff: Vec::new(),
+            },
+        );
+        assert_eq!(
+            app.files.selected_index(),
+            None,
+            "lista vuota, nessuna riga"
+        );
+
+        app.focus = Panel::Changes;
+        press(&mut app, KeyCode::Char(' '));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char(' '));
+
+        assert!(app.files.is_empty());
+    }
+
+    #[test]
+    fn each_branch_panel_moves_only_its_own_selection() {
+        let mut app = TestApp::new();
+        assert!(app.remote_branches.len() > 1, "servono almeno due remoti");
+
+        app.focus = Panel::Remotes;
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.remote_branches.selected_index(), Some(1));
+        assert_eq!(
+            app.local_branches.selected_index(),
+            Some(0),
+            "i locali non si muovono"
+        );
+
+        app.focus = Panel::Branches;
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.local_branches.selected_index(), Some(1));
+        assert_eq!(
+            app.remote_branches.selected_index(),
+            Some(1),
+            "i remoti non si muovono"
+        );
     }
 
     #[test]
@@ -859,19 +1101,28 @@ mod tests {
     fn panel_next_and_prev_wrap_around() {
         assert_eq!(Panel::Diff.next(), Panel::Branches);
         assert_eq!(Panel::Branches.prev(), Panel::Diff);
-        assert_eq!(Panel::History.next(), Panel::Changes);
+        assert_eq!(Panel::Branches.next(), Panel::Remotes);
+        assert_eq!(Panel::Remotes.next(), Panel::History);
+        assert_eq!(Panel::History.prev(), Panel::Remotes);
         assert_eq!(Panel::Changes.prev(), Panel::History);
     }
 
+    /// Il pannello a fuoco è l'unico a muoversi, anche quando il contenuto
+    /// non è una lista: `Model::content_mut` sceglie il cursore, `step` non
+    /// sa più quale sia.
     #[test]
-    fn step_list_clamps_at_bounds_and_tolerates_empty_lists() {
-        let mut state = ListState::default().with_selected(Some(0));
-        step_list(&mut state, 3, -1);
-        assert_eq!(state.selected(), Some(0));
-        step_list(&mut state, 3, 10);
-        assert_eq!(state.selected(), Some(2));
-        step_list(&mut state, 0, 1); // lista vuota: niente panico, selezione invariata
-        assert_eq!(state.selected(), Some(2));
+    fn only_the_focused_panel_moves() {
+        let mut app = TestApp::new();
+        app.focus = Panel::Diff;
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.diff_scroll, 1);
+        assert_eq!(app.commits.selected_index(), Some(0));
+        assert_eq!(app.files.selected_index(), Some(0));
+
+        app.focus = Panel::Changes;
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.files.selected_index(), Some(1));
+        assert_eq!(app.commits.selected_index(), Some(0));
     }
 
     #[test]
@@ -882,5 +1133,104 @@ mod tests {
         app.focus = Panel::History;
         press(&mut app, KeyCode::Down);
         assert_eq!(app.diff_scroll, 0);
+    }
+
+    /// Un `TestApp` con il focus sul Diff, `lines` righe di diff e un
+    /// pannello alto `viewport` righe, annunciato come lo annuncerebbe un
+    /// frame appena disegnato (`viewport` a 0 vuol dire "mai disegnato").
+    fn app_showing_diff(lines: usize, viewport: u16) -> TestApp {
+        let mut app = TestApp::new();
+        app.focus = Panel::Diff;
+        app.diff = (0..lines).map(|i| format!("line {i}")).collect();
+        app.diff_scroll = 0;
+        app.send(Msg::DiffViewport(viewport));
+        app
+    }
+
+    #[test]
+    fn diff_scroll_stops_with_the_last_line_at_the_bottom_of_the_panel() {
+        let mut app = app_showing_diff(10, 4);
+        for _ in 0..20 {
+            press(&mut app, KeyCode::Down);
+        }
+        // Righe 6..9 visibili: l'ultima è in fondo al pannello, non in cima.
+        assert_eq!(app.diff_scroll, 6);
+    }
+
+    #[test]
+    fn a_diff_shorter_than_the_panel_does_not_scroll() {
+        let mut app = app_showing_diff(3, 10);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.diff_scroll, 0);
+    }
+
+    /// Ingrandire il terminale non deve lasciare righe vuote sotto
+    /// l'ultima riga del diff: il limite si riapplica quando arriva la
+    /// nuova altezza, non al tasto successivo.
+    #[test]
+    fn a_taller_panel_pulls_the_scroll_back_to_the_bottom() {
+        let mut app = app_showing_diff(10, 4);
+        for _ in 0..20 {
+            press(&mut app, KeyCode::Down);
+        }
+        assert_eq!(app.diff_scroll, 6);
+
+        app.send(Msg::DiffViewport(19));
+        assert_eq!(app.diff_viewport, 19);
+        assert_eq!(app.diff_scroll, 0, "il diff ci sta tutto");
+
+        app.send(Msg::DiffViewport(7));
+        assert_eq!(app.diff_scroll, 0, "rimpicciolire non muove lo scroll");
+    }
+
+    /// L'anello completo: il pannello viene disegnato, la sua altezza
+    /// rientra nel `Model` e lo scorrimento si ferma dove il pannello
+    /// finisce. Gli altri test di scorrimento fissano l'altezza a mano e
+    /// non passano da `ui`.
+    #[test]
+    fn scrolling_a_drawn_panel_stops_at_its_real_bottom() {
+        let mut app = app_showing_diff(100, 0);
+        ui::render(100, 30, &mut app.model);
+        let visible = app.diff_viewport;
+        assert!(visible > 0, "il pannello è stato disegnato");
+
+        for _ in 0..200 {
+            press(&mut app, KeyCode::Down);
+        }
+        assert_eq!(app.diff_scroll, 100 - visible);
+
+        // L'ultima riga del diff è davvero l'ultima riga del pannello.
+        let out = ui::render(100, 30, &mut app.model);
+        assert!(out.contains("line 99"), "{out}");
+        assert!(!out.contains("line 85"), "{out}");
+    }
+
+    #[test]
+    fn an_empty_diff_or_an_unknown_height_scrolls_without_panicking() {
+        let mut app = app_showing_diff(0, 0);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.diff_scroll, 0);
+
+        app.send(Msg::DiffViewport(10));
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.diff_scroll, 0);
+
+        // Altezza ancora sconosciuta su un diff non vuoto: lo scorrimento
+        // non si blocca, e resta comunque dentro il diff.
+        let mut app = app_showing_diff(3, 0);
+        for _ in 0..10 {
+            press(&mut app, KeyCode::Down);
+        }
+        assert_eq!(app.diff_scroll, 2);
+    }
+
+    /// Un diff più lungo di quanto `u16` possa contare non fa saltare lo
+    /// scorrimento in cima né panicare: il limite si ferma a `u16::MAX`.
+    #[test]
+    fn a_diff_longer_than_u16_clamps_instead_of_wrapping_around() {
+        assert_eq!(max_diff_scroll(usize::MAX, 10), u16::MAX);
+        assert_eq!(max_diff_scroll(70_000, 20), u16::MAX);
+        assert_eq!(max_diff_scroll(0, 0), 0);
+        assert_eq!(max_diff_scroll(0, 40), 0);
     }
 }

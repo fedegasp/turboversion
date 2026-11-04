@@ -12,9 +12,12 @@ changes and diff, all visible at once, navigable entirely from the keyboard.
 > working-tree status and diffs from a real Git repository (via
 > [`git2`](https://docs.rs/git2), see [`src/git/git2.rs`](src/git/git2.rs)):
 > it picks up the repository containing the current directory and exits
-> with an error if there isn't one. Creating and deleting local branches
-> writes to the repository for real; staging and commits don't yet.
-> `src/git/mock.rs` is now test-only fixture data.
+> with an error if there isn't one. Local and remote-tracking branches live
+> in two separate panels; tags are still read from the repository (the
+> branch-name validation needs them) but aren't shown in any panel.
+> Creating and deleting local branches writes to the repository for real;
+> staging and commits don't yet. `src/git/mock.rs` is now test-only fixture
+> data.
 
 ## Preview
 
@@ -24,14 +27,14 @@ changes and diff, all visible at once, navigable entirely from the keyboard.
 ║ * main       ║║ ●─╮ a1b2c3d Merge feature/menu               Mario      ║
 ║   develop    ║║ │ ● d4e5f6a Add dropdown menu                Luca       ║
 ║   feature/.. ║║ │ ● 9f8e7d6 Add menubar widget               Luca       ║
-║   origin/... ║║ ●─╯ c0ffee1 Fix status bar                   Mario      ║
-║   v0.1.0     ║╚══════════════════════════════════════════════════════════╝
-║              ║┌ Changes ═══════════┐┌ Diff ══════════════════════════════┐
-║              ║│ [x] M src/main.rs  ││ diff --git a/src/theme.rs ...      │
-║              ║│ [ ] M src/theme.rs ││ @@ -1,6 +1,9 @@                    │
-╚══════════════╝│ [ ] A src/ui.rs    ││-pub fn window() -> Style {         │
-                │ [ ] D README.md    ││+pub fn window() -> Style {         │
-                └────────────────────┘└────────────────────────────────────┘
+║              ║║ ●─╯ c0ffee1 Fix status bar                   Mario      ║
+╚══════════════╝╚══════════════════════════════════════════════════════════╝
+┌ Remotes ─────┐┌ Changes ═══════════┐┌ Diff ══════════════════════════════┐
+│ origin/main  ││ [x] M src/main.rs  ││ diff --git a/src/theme.rs ...      │
+│ origin/dev.. ││ [ ] M src/theme.rs ││ @@ -1,6 +1,9 @@                    │
+│              ││ [ ] A src/ui.rs    ││-pub fn window() -> Style {         │
+│              ││ [ ] D README.md    ││+pub fn window() -> Style {         │
+└──────────────┘└────────────────────┘└────────────────────────────────────┘
  Tab Panel  ↑↓ Move  Space Stage  F10 Menu  Alt-X Quit
 ```
 
@@ -45,11 +48,14 @@ Vision touches.
 - **Turbo Vision aesthetic**: 16-color ANSI palette, yellow-on-blue windows,
   thick border when focused / plain border otherwise, drop shadows on
   floating panels.
-- **SourceTree-style layout**: Branches, History, Changes and Diff panels
-  on screen together, automatically collapsing to a single focused panel on
-  narrow terminals (< 80 columns).
-- **Keyboard-driven UX**: panel switching, list navigation, file staging
-  toggle, diff scrolling.
+- **SourceTree-style layout**: Branches, Remotes, History, Changes and Diff
+  panels on screen together — local branches and remote-tracking branches
+  each get their own panel, sharing the left column — automatically
+  collapsing to a single focused panel on narrow terminals (< 80 columns).
+- **Keyboard-driven UX**: panel switching, list navigation, stage checkbox
+  toggle (display only so far — see Status), diff scrolling — scrolling
+  stops with the last line of the diff at the bottom of the panel, instead
+  of pushing it to the top of an otherwise empty panel.
 - **Turbo Vision-style menu bar**: `F10` or `Alt+<letter>` opens a dropdown
   menu, navigable with arrow keys.
 - **Modal dialogs**: Turbo Vision-style message boxes, Yes/No confirmations and
@@ -93,9 +99,9 @@ cargo test
 
 | Key | Action |
 |---|---|
-| `Tab` / `Shift+Tab` | Move focus to the next / previous panel |
+| `Tab` / `Shift+Tab` | Move focus to the next / previous panel (Branches, Remotes, History, Changes, Diff) |
 | `↑` / `k`, `↓` / `j` | Move selection (or scroll the diff, when focused) |
-| `Space` | Toggle stage/unstage for the selected file (Changes panel) |
+| `Space` | Toggle the stage checkbox of the selected file (Changes panel) — display only: nothing is staged in the repository yet |
 | `F10` | Open the menu bar |
 | `Alt` + letter | Open the corresponding menu directly |
 | `←` / `→` (menu open) | Switch menu |
@@ -109,6 +115,15 @@ cargo test
 > you enable *Use Option as Meta Key* in the profile's Keyboard settings (or
 > use an emulator that does this by default, e.g. iTerm2). `F10` and
 > `Ctrl+C` always work regardless of this setting.
+
+> **Note:** `Branch > Delete` always acts on the selection of the *Branches*
+> panel, wherever the focus is — except when the Remotes panel is focused,
+> where it is refused with a message instead of deleting a local branch you
+> weren't looking at.
+
+> **Note:** the Diff panel does not wrap long lines: it cuts them at the
+> right edge, like `less -S`. There is no horizontal scrolling, so the tail
+> of a line wider than the panel can't be read.
 
 ### Dialogs
 
@@ -129,7 +144,10 @@ boundary towards git (the `Repo` trait). See
 ```
 src/
 ├── main.rs          Terminal setup/teardown, entry point
-├── app.rs            Model and update(): state plus the main loop
+├── app.rs            Model, update() and the main loop; Model::content_mut(),
+│                     the single "panel -> data" table
+├── list_panel.rs     ListPanel<T>: a list's items and its cursor as one value,
+│                     keeping the selection valid (or None on an empty list)
 ├── msg.rs            Msg (incoming events) and Cmd (requested effects)
 ├── effects.rs        Runs a Cmd against Repo, produces the resulting Msg
 ├── worker.rs         Worker thread owning the Repo, so git never blocks the UI
@@ -143,10 +161,15 @@ src/
 │   ├── validate.rs   Branch-name rules and error messages, shared by backends
 │   └── mock.rs       Test-only fixture data
 └── ui/
-    ├── mod.rs        view(): layout of all panels
+    ├── mod.rs        view(): panel layout and render dispatch; reports the
+    │                 height of the Diff panel back to update() as a Msg
+    ├── view_model.rs Model -> what to draw: which rows and key hints each
+    │                 panel gets (the panels decide how they look)
     ├── theme.rs      Turbo Vision color palette and styles
     ├── text.rs       Text-fitting helpers
-    ├── panels/       Branches, History, Changes, Diff, menubar, status bar
+    ├── panels/       Branches, Remotes, History, Changes, Diff, menubar,
+    │                 status bar, dialogs (branches.rs renders both branch
+    │                 panels)
     └── widgets/
         └── window.rs Bordered + shadowed Turbo Vision-style window widget
 ```

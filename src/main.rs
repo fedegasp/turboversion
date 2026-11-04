@@ -10,6 +10,7 @@ mod dialog;
 mod effects;
 mod git;
 mod input;
+mod list_panel;
 mod msg;
 mod ui;
 mod worker;

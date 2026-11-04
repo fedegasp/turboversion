@@ -14,8 +14,6 @@ use crate::msg::Msg;
 
 const MAX_INPUT: usize = 64;
 
-type Hints = &'static [(&'static str, &'static str)];
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Kind {
     /// Solo informazione: un pulsante OK.
@@ -84,7 +82,12 @@ impl Dialog {
         }
     }
 
-    pub(crate) fn hints(&self) -> Hints {
+    /// Le scorciatoie da mostrare mentre il dialog è aperto. Il tipo è
+    /// scritto per esteso invece che dietro un alias locale: un alias
+    /// `Hints` qui sarebbe un secondo tipo con lo stesso nome di quello
+    /// della barra di stato, e questo modulo non può importare quello
+    /// (è stato dell'app, non rendering).
+    pub(crate) fn hints(&self) -> &'static [(&'static str, &'static str)] {
         match self.kind {
             Kind::Message => &[("Enter", "OK"), ("Esc", "Close")],
             Kind::Confirm => &[

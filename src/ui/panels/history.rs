@@ -11,11 +11,11 @@ use ratatui::{
     layout::Rect,
     style::Style,
     text::{Line, Span},
-    widgets::ListItem,
+    widgets::{ListItem, ListState},
     Frame,
 };
 
-use crate::app::Model;
+use crate::git::domain::Commit;
 use crate::ui::text::fit;
 use crate::ui::theme;
 
@@ -23,12 +23,17 @@ const GRAPH_W: usize = 4;
 const HASH_W: usize = 8;
 const AUTHOR_W: usize = 12;
 
-pub(crate) fn render(f: &mut Frame, model: &mut Model, area: Rect, selection: Style) {
+pub(crate) fn render(
+    f: &mut Frame,
+    commits: &[Commit],
+    area: Rect,
+    selection: Style,
+    state: &mut ListState,
+) {
     let avail = (area.width as usize).saturating_sub(GRAPH_W + HASH_W);
     let author_w = AUTHOR_W.min(avail);
     let msg_w = avail.saturating_sub(author_w);
-    let items: Vec<ListItem> = model
-        .commits
+    let items: Vec<ListItem> = commits
         .iter()
         .map(|c| {
             ListItem::new(Line::from(vec![
@@ -39,5 +44,5 @@ pub(crate) fn render(f: &mut Frame, model: &mut Model, area: Rect, selection: St
             ]))
         })
         .collect();
-    super::render_list(f, items, area, selection, &mut model.history);
+    super::render_list(f, items, area, selection, state);
 }

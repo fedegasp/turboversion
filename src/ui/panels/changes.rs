@@ -11,22 +11,26 @@ use ratatui::{
     layout::Rect,
     style::Style,
     text::{Line, Span},
-    widgets::ListItem,
+    widgets::{ListItem, ListState},
     Frame,
 };
 
-use crate::app::Model;
-use crate::git::domain::FileStatus;
+use crate::git::domain::{FileEntry, FileStatus};
 use crate::ui::text::fit;
 use crate::ui::theme;
 
 const MARK_W: usize = 4;
 const STATUS_W: usize = 2;
 
-pub(crate) fn render(f: &mut Frame, model: &mut Model, area: Rect, selection: Style) {
+pub(crate) fn render(
+    f: &mut Frame,
+    files: &[FileEntry],
+    area: Rect,
+    selection: Style,
+    state: &mut ListState,
+) {
     let path_w = (area.width as usize).saturating_sub(MARK_W + STATUS_W);
-    let items: Vec<ListItem> = model
-        .files
+    let items: Vec<ListItem> = files
         .iter()
         .map(|e| {
             let mark = if e.staged { "[x]" } else { "[ ]" };
@@ -42,5 +46,5 @@ pub(crate) fn render(f: &mut Frame, model: &mut Model, area: Rect, selection: St
             ]))
         })
         .collect();
-    super::render_list(f, items, area, selection, &mut model.changes);
+    super::render_list(f, items, area, selection, state);
 }

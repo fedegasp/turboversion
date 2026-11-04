@@ -5,10 +5,9 @@
 // 2026-11-03 Federico Gasperini
 //
 
-//! Barra di stato: scorciatoie disponibili, che cambiano in base
-//! all'overlay attivo (dialog > menu > pannello principale).
-
-use std::borrow::Cow;
+//! Barra di stato: disegna le scorciatoie attive, scelte da
+//! `ui::view_model::hints` in base all'overlay in cima e al pannello a
+//! fuoco.
 
 use ratatui::{
     layout::Rect,
@@ -17,30 +16,8 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{Model, Panel};
 use crate::ui::theme;
-
-pub(crate) type Hints = Cow<'static, [(&'static str, &'static str)]>;
-
-/// Scorciatoie del pannello principale; `Space Stage` compare solo quando il
-/// focus è sul pannello Changes, dove quel tasto ha davvero effetto.
-fn main_hints(focus: Panel) -> Vec<(&'static str, &'static str)> {
-    let mut hints = vec![("Tab", "Panel"), ("↑↓", "Move")];
-    if focus == Panel::Changes {
-        hints.push(("Space", "Stage"));
-    }
-    hints.push(("F10", "Menu"));
-    hints.push(("Alt-X", "Quit"));
-    hints
-}
-
-pub(crate) fn hints(model: &Model) -> Hints {
-    match (model.dialog(), model.menu()) {
-        (Some(d), _) => Cow::Borrowed(d.hints()),
-        (None, Some(_)) => Cow::Borrowed(super::menubar::MENU_KEYS),
-        (None, None) => Cow::Owned(main_hints(model.focus)),
-    }
-}
+use crate::ui::view_model::Hints;
 
 pub(crate) fn render_statusbar(f: &mut Frame, area: Rect, keys: Hints) {
     let mut spans = Vec::new();
@@ -57,8 +34,7 @@ pub(crate) fn render_statusbar(f: &mut Frame, area: Rect, keys: Hints) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::app::{model_for_tests, MenuState, Overlay};
+    use crate::app::{model_for_tests, MenuState, Overlay, Panel};
 
     #[test]
     fn statusbar_hints_change_when_menu_opens() {
