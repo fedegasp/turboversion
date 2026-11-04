@@ -5,13 +5,20 @@
 // 2026-11-03 Federico Gasperini
 //
 
-//! Implementazione di `Repo` che riproduce in memoria i dati finti e il
-//! comportamento (inclusa la validazione dei nomi di ramo) che nel
-//! prototipo iniziale vivevano sparsi tra `app.rs` e `mock.rs`. Serve a
-//! sviluppare la TUI senza dipendere da un repository reale.
+//! Implementazione di `Repo` con dati finti in memoria, per esercitare la
+//! TUI senza dipendere da un repository reale. Le operazioni mutanti usano
+//! le stesse regole sui nomi e gli stessi messaggi d'errore del backend
+//! reale (`git::validate`), così un test che passa qui non descrive un
+//! comportamento inesistente in produzione.
+//!
+//! Resta fuori portata ciò che solo un refdb vero può rilevare: una
+//! collisione fra nomi che differiscono per sole maiuscole su un filesystem
+//! case-insensitive, o un ramo `a/b` quando esiste già `a`. Sul backend
+//! reale sono errori, qui no.
 
 use super::domain::{Branch, BranchKind, Commit, FileEntry, FileStatus};
 use super::repo::{GitError, Repo};
+use super::validate::{branch_not_found, current_branch_not_deletable, validate_branch_name};
 
 fn initial_branches() -> Vec<Branch> {
     [
@@ -91,38 +98,6 @@ fn initial_diff() -> Vec<String> {
     .collect()
 }
 
-/// Valida un nome di ramo in modo vicino a `git check-ref-format`: niente
-/// spazi/controlli, niente `-` iniziale (eviterebbe che un domani, passato a
-/// `git` come argomento, venga scambiato per un'opzione), niente sequenze o
-/// terminazioni che git stesso rifiuta.
-fn validate_branch_name(name: &str, existing: &[Branch]) -> Option<String> {
-    const INVALID_CHARS: &[char] = &['~', '^', ':', '?', '*', '[', '\\', ' '];
-    if name.is_empty() {
-        return Some("Branch name cannot be empty.".to_string());
-    }
-    if name.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return Some("Branch names cannot contain spaces or control characters.".to_string());
-    }
-    if name.starts_with('-') {
-        return Some("Branch names cannot start with '-'.".to_string());
-    }
-    if name.ends_with('/') || name.ends_with('.') || name.ends_with(".lock") {
-        return Some("Branch names cannot end with '/', '.' or '.lock'.".to_string());
-    }
-    if name.contains("..")
-        || name.contains("@{")
-        || name.chars().any(|c| INVALID_CHARS.contains(&c))
-    {
-        return Some(
-            "Branch names cannot contain '..', '@{', or any of ~ ^ : ? * [ \\.".to_string(),
-        );
-    }
-    if existing.iter().any(|b| b.name == name) {
-        return Some(format!("Branch '{name}' already exists."));
-    }
-    None
-}
-
 /// Backend git "finto": tiene i dati in memoria, per sviluppare la TUI senza
 /// dipendere da un repository reale (vedi roadmap in README.md).
 pub(crate) struct MockGitRepo {
@@ -180,7 +155,20 @@ impl Repo for MockGitRepo {
     }
 
     fn delete_branch(&mut self, name: &str) -> Result<(), GitError> {
-        self.branches.retain(|b| b.name != name);
+        // Stesse condizioni del backend reale: solo rami locali (un nome
+        // remoto o un tag semplicemente "non esiste" come ramo locale) e
+        // mai quello corrente.
+        let Some(index) = self
+            .branches
+            .iter()
+            .position(|b| b.name == name && b.kind == BranchKind::Local)
+        else {
+            return Err(branch_not_found(name));
+        };
+        if self.branches[index].current {
+            return Err(current_branch_not_deletable(name));
+        }
+        self.branches.remove(index);
         Ok(())
     }
 }
@@ -188,6 +176,7 @@ impl Repo for MockGitRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::validate::{branch_already_exists, branch_path_conflict};
 
     #[test]
     fn create_branch_adds_a_local_branch_and_returns_it() {
@@ -210,7 +199,6 @@ mod tests {
         for bad in [
             "",
             "two words",
-            "develop",
             "-oops",
             "a..b",
             "a@{b",
@@ -222,6 +210,19 @@ mod tests {
                 "{bad:?} doveva essere rifiutato"
             );
         }
+        // Stesso messaggio del backend reale, non un errore qualsiasi.
+        assert_eq!(
+            repo.create_branch("develop").unwrap_err(),
+            branch_already_exists("develop")
+        );
+        assert_eq!(
+            repo.create_branch("feature").unwrap_err(),
+            branch_path_conflict("feature", "feature/menu")
+        );
+        assert_eq!(
+            repo.create_branch("main/x").unwrap_err(),
+            branch_path_conflict("main/x", "main")
+        );
         assert_eq!(repo.branches().len(), n);
     }
 
@@ -237,12 +238,33 @@ mod tests {
     }
 
     #[test]
-    fn delete_branch_is_a_noop_for_an_unknown_name() {
+    fn delete_branch_fails_for_an_unknown_name() {
         let mut repo = MockGitRepo::new();
         let n = repo.branches().len();
 
-        repo.delete_branch("does-not-exist").unwrap();
+        assert_eq!(
+            repo.delete_branch("does-not-exist").unwrap_err(),
+            branch_not_found("does-not-exist")
+        );
 
+        assert_eq!(repo.branches().len(), n);
+    }
+
+    #[test]
+    fn delete_branch_refuses_the_current_branch_and_non_local_refs() {
+        let mut repo = MockGitRepo::new();
+        let n = repo.branches().len();
+
+        assert_eq!(
+            repo.delete_branch("main").unwrap_err(),
+            current_branch_not_deletable("main")
+        );
+        for name in ["origin/main", "v0.1.0"] {
+            assert_eq!(
+                repo.delete_branch(name).unwrap_err(),
+                branch_not_found(name)
+            );
+        }
         assert_eq!(repo.branches().len(), n);
     }
 }

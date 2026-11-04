@@ -326,6 +326,11 @@ fn apply_loaded(
 fn apply_branch_created(model: &mut Model, name: String, result: Result<Branch, GitError>) {
     match result {
         Ok(branch) => {
+            // Aggiornamento locale invece di una ricarica dal repository:
+            // il ramo finisce in fondo alla lista, quindi dopo i tag,
+            // mentre una rilettura lo collocherebbe tra i locali. È una
+            // divergenza solo di ordinamento, che sparirà quando l'esito Ok
+            // potrà chiedere una ricarica completa.
             model.branch_list.push(branch);
             model.branches.select(Some(model.branch_list.len() - 1));
         }
@@ -347,6 +352,10 @@ fn apply_branch_created(model: &mut Model, name: String, result: Result<Branch, 
 fn apply_branch_deleted(model: &mut Model, name: String, result: Result<(), GitError>) {
     match result {
         Ok(()) => {
+            // Il confronto è sul solo nome: se esistono insieme un ramo
+            // locale e un tag omonimi (creabili fuori dall'app), dalla
+            // lista sparisce anche il tag, che nel repository c'è ancora.
+            // Anche questo si chiude con una ricarica dopo l'esito Ok.
             model.branch_list.retain(|b| b.name != name);
             let last = model.branch_list.len().checked_sub(1);
             let sel = model.branches.selected().zip(last).map(|(s, l)| s.min(l));

@@ -5,9 +5,10 @@
 // 2026-11-03 Federico Gasperini
 //
 
-//! Confine verso git: tipi di dominio, il trait `Repo`, il backend reale
-//! (`git2`, su `git2` esterno) e il backend mock (`mock`) usato dai test e
-//! da `model_for_tests`/`TestApp`. Questo modulo non importa mai nulla da
+//! Confine verso git: tipi di dominio, il trait `Repo`, le regole di
+//! validazione condivise (`validate`), il backend reale (`git2`, su `git2`
+//! esterno) e il backend mock (`mock`) usato dai test e da
+//! `model_for_tests`/`TestApp`. Questo modulo non importa mai nulla da
 //! `app` o `ui`.
 
 pub(crate) mod domain;
@@ -18,3 +19,4 @@ pub(crate) mod git2;
 #[cfg(test)]
 pub(crate) mod mock;
 pub(crate) mod repo;
+pub(crate) mod validate;

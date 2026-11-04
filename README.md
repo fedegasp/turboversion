@@ -8,13 +8,13 @@ layout and workflow of **SourceTree**: branches, commit history, working-tree
 changes and diff, all visible at once, navigable entirely from the keyboard.
 
 > **Status: early prototype.** The UI, layout, menu system and keybindings
-> are implemented and working. The app now reads branches, commit history,
+> are implemented and working. The app reads branches, commit history,
 > working-tree status and diffs from a real Git repository (via
 > [`git2`](https://docs.rs/git2), see [`src/git/git2.rs`](src/git/git2.rs)):
 > it picks up the repository containing the current directory and exits
-> with an error if there isn't one. Writing to the repository (branch
-> create/delete, staging, commits) isn't wired up yet; `src/git/mock.rs` is
-> now test-only fixture data.
+> with an error if there isn't one. Creating and deleting local branches
+> writes to the repository for real; staging and commits don't yet.
+> `src/git/mock.rs` is now test-only fixture data.
 
 ## Preview
 
@@ -61,15 +61,13 @@ Vision touches.
 ## Roadmap
 
 - [x] Replace mock data with real repository data (via `git2`): branches,
-      commit log, working-tree status, diffs. Read-only so far; see
-      "Known limitations" below.
+      commit log, working-tree status, diffs.
 - [ ] Wire up the remaining menu actions. Working so far: `File > Quit`,
-      `Help > About`. `Branch > New branch...` and `Branch > Delete` open
-      their dialog and submit, but the real backend doesn't support writing
-      yet, so they report an error instead of changing the repository; the
-      rest show a "not available yet" dialog.
+      `Help > About`, `Branch > New branch...` and `Branch > Delete` (both
+      now change the repository for real); the rest show a "not available
+      yet" dialog.
 - [ ] Stage/unstage and commit from the UI.
-- [ ] Branch checkout/creation/deletion.
+- [x] Branch creation/deletion (local branches). Checkout still missing.
 - [ ] Repository picker (`File > Open repository...`, `Clone...`).
 
 ## Getting started
@@ -124,17 +122,33 @@ cargo test
 
 ## Project layout
 
+The app follows an Elm-style Model / Update / View split, with a single
+boundary towards git (the `Repo` trait). See
+[`docs/architettura.md`](docs/architettura.md) for the full picture.
+
 ```
 src/
 ├── main.rs          Terminal setup/teardown, entry point
-├── app.rs            Application state and input handling
-├── ui.rs              Layout and rendering of all panels
-├── dialog.rs          Modal dialog state and key handling (no rendering)
-├── theme.rs           Turbo Vision color palette and styles
-├── mock.rs            Placeholder data (branches, commits, files, diff)
-└── widgets/
-    ├── mod.rs          Re-exports the `window` module
-    └── window.rs      Bordered + shadowed Turbo Vision-style window widget
+├── app.rs            Model and update(): state plus the main loop
+├── msg.rs            Msg (incoming events) and Cmd (requested effects)
+├── effects.rs        Runs a Cmd against Repo, produces the resulting Msg
+├── worker.rs         Worker thread owning the Repo, so git never blocks the UI
+├── dialog.rs         Modal dialog state and key handling (no rendering)
+├── input/
+│   └── mod.rs        Key events -> Msg
+├── git/
+│   ├── repo.rs       The Repo trait: the only boundary towards git
+│   ├── domain.rs     Branch, Commit, FileEntry: git as the app sees it
+│   ├── git2.rs       Real repository backend, via `git2`
+│   ├── validate.rs   Branch-name rules and error messages, shared by backends
+│   └── mock.rs       Test-only fixture data
+└── ui/
+    ├── mod.rs        view(): layout of all panels
+    ├── theme.rs      Turbo Vision color palette and styles
+    ├── text.rs       Text-fitting helpers
+    ├── panels/       Branches, History, Changes, Diff, menubar, status bar
+    └── widgets/
+        └── window.rs Bordered + shadowed Turbo Vision-style window widget
 ```
 
 ## License

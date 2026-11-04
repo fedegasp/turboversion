@@ -6,11 +6,15 @@
 //
 
 //! Backend `Repo` su un repository reale, via `git2` (bindings a
-//! `libgit2`). Solo lettura per ora (vedi `create_branch`/`delete_branch`
-//! sotto): la scrittura reale arriverà in un passo successivo.
+//! `libgit2`). Oltre alle letture gestisce la creazione e la cancellazione
+//! di rami locali; le altre scritture (stage, commit, checkout) arriveranno
+//! in passi successivi.
 
 use super::domain::{Branch, BranchKind, Commit, FileEntry, FileStatus};
 use super::repo::{GitError, Repo};
+use super::validate::{
+    branch_already_exists, branch_not_found, current_branch_not_deletable, validate_branch_name,
+};
 
 /// Limite al numero di commit letti da `commits()`: una cronologia reale può
 /// contenere centinaia di migliaia di commit, e caricarli tutti in memoria a
@@ -39,6 +43,14 @@ impl GitRepo {
 /// così che `app`/`ui` non debbano mai conoscere `git2::Error`.
 fn from_git2(err: git2::Error) -> GitError {
     GitError(err.message().to_string())
+}
+
+/// Come `from_git2`, ma antepone l'operazione tentata. Per le letture il
+/// contesto è ovvio (sono tutte parte del caricamento iniziale), per le
+/// scritture no: il solo testo di libgit2 non dice che cosa l'applicazione
+/// stava provando a fare quando è fallita.
+fn from_git2_while(context: &str, err: git2::Error) -> GitError {
+    GitError(format!("{context}: {}", err.message()))
 }
 
 impl Repo for GitRepo {
@@ -211,22 +223,97 @@ impl Repo for GitRepo {
         patch.lines().map(str::to_string).collect()
     }
 
-    fn create_branch(&mut self, _name: &str) -> Result<Branch, GitError> {
-        Err(GitError(
-            "Creazione di un ramo non ancora supportata da questo backend.".to_string(),
-        ))
+    fn create_branch(&mut self, name: &str) -> Result<Branch, GitError> {
+        // La validazione viene prima di toccare il repository, così un nome
+        // malformato o già preso non lascia nulla a metà; `branches()`
+        // include anche remoti e tag, ma solo i nomi esatti collidono.
+        if let Some(message) = validate_branch_name(name, &self.branches()) {
+            return Err(GitError(message));
+        }
+
+        let context = format!("Cannot create branch '{name}'");
+
+        // Il ramo nasce sul commit di HEAD, come `git branch <name>`. Che
+        // HEAD non punti ancora a un commit è un caso normale (repository
+        // appena inizializzato, o ramo orfano) e merita un messaggio
+        // comprensibile al posto di quello interno di libgit2.
+        let head = self.repo.head().map_err(|err| {
+            if matches!(
+                err.code(),
+                git2::ErrorCode::UnbornBranch | git2::ErrorCode::NotFound
+            ) {
+                GitError(format!("{context}: HEAD does not point to a commit yet."))
+            } else {
+                from_git2_while(&context, err)
+            }
+        })?;
+        let commit = head
+            .peel_to_commit()
+            .map_err(|err| from_git2_while(&context, err))?;
+
+        // `force = false`: senza sovrascritture silenziose di un ramo
+        // esistente, la validazione sopra è l'unico punto che decide.
+        let created = self.repo.branch(name, &commit, false).map_err(|err| {
+            // Un conflitto può emergere solo qui e non in validazione: su un
+            // filesystem case-insensitive `FEATURE` e `feature` sono lo
+            // stesso riferimento, e il confronto sui nomi non lo vede.
+            if err.code() == git2::ErrorCode::Exists {
+                branch_already_exists(name)
+            } else {
+                from_git2_while(&context, err)
+            }
+        })?;
+
+        // Il nome si rilegge dal riferimento creato invece di riecheggiare
+        // quello richiesto: libgit2 può normalizzarlo, e il Model deve
+        // contenere il nome che esiste davvero nel repository, altrimenti
+        // la lista dei rami mostra un ramo inesistente. Il ripiego su
+        // `name` copre il solo caso di un riferimento non UTF-8, dove il
+        // nome digitato resta l'approssimazione migliore disponibile.
+        let actual = created.name().ok().flatten().unwrap_or(name).to_string();
+
+        Ok(Branch {
+            name: actual,
+            kind: BranchKind::Local,
+            current: false,
+        })
     }
 
-    fn delete_branch(&mut self, _name: &str) -> Result<(), GitError> {
-        Err(GitError(
-            "Cancellazione di un ramo non ancora supportata da questo backend.".to_string(),
-        ))
+    fn delete_branch(&mut self, name: &str) -> Result<(), GitError> {
+        let context = format!("Cannot delete branch '{name}'");
+
+        // Solo rami locali: un nome remoto o un tag non si cancella da qui.
+        // `InvalidSpec` accanto a `NotFound` perché un nome malformato (es.
+        // `a..b`) non è un riferimento che possa esistere: per chi guarda
+        // la lista dei rami è lo stesso caso di "non c'è".
+        let mut branch = self
+            .repo
+            .find_branch(name, git2::BranchType::Local)
+            .map_err(|err| {
+                if matches!(
+                    err.code(),
+                    git2::ErrorCode::NotFound | git2::ErrorCode::InvalidSpec
+                ) {
+                    branch_not_found(name)
+                } else {
+                    from_git2_while(&context, err)
+                }
+            })?;
+
+        if branch.is_head() {
+            return Err(current_branch_not_deletable(name));
+        }
+
+        branch
+            .delete()
+            .map_err(|err| from_git2_while(&context, err))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::validate::branch_path_conflict;
     use std::fs;
     use std::path::Path;
 
@@ -388,12 +475,216 @@ mod tests {
     }
 
     #[test]
-    fn create_and_delete_branch_are_not_implemented_yet() {
+    fn create_branch_adds_a_local_branch_on_head() {
         let dir = tempfile::tempdir().unwrap();
         init_repo_with_a_commit(dir.path());
         let mut real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
 
-        assert!(real.create_branch("feature/x").is_err());
-        assert!(real.delete_branch("main").is_err());
+        let created = real.create_branch("feature/x").unwrap();
+
+        assert_eq!(created.name, "feature/x");
+        assert_eq!(created.kind, BranchKind::Local);
+        assert!(!created.current);
+
+        let listed = real
+            .branches()
+            .into_iter()
+            .find(|b| b.name == created.name)
+            .expect("il ramo creato deve comparire tra i branch del repository");
+        assert_eq!(listed.kind, BranchKind::Local);
+        assert!(!listed.current);
+    }
+
+    #[test]
+    fn create_branch_rejects_duplicate_and_invalid_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_a_commit(dir.path());
+        let head_name = repo.head().unwrap().shorthand().unwrap().to_string();
+        let mut real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+        let before = real.branches().len();
+
+        assert!(real.create_branch(&head_name).is_err());
+        for bad in ["", "two words", "-oops", "a..b", "trailing.lock"] {
+            assert!(
+                real.create_branch(bad).is_err(),
+                "{bad:?} doveva essere rifiutato"
+            );
+        }
+
+        assert_eq!(real.branches().len(), before);
+    }
+
+    #[test]
+    fn create_branch_refuses_names_libgit2_would_rewrite() {
+        // Senza la validazione, `repo.branch("a//b", ..)` riuscirebbe
+        // creando `refs/heads/a/b`: un ramo con un nome diverso da quello
+        // chiesto. Il rifiuto dev'essere pulito, senza riferimenti lasciati
+        // indietro con il nome normalizzato.
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_a_commit(dir.path());
+        let mut real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+
+        assert!(real.create_branch("a//b").is_err());
+        assert!(real.create_branch("/lead").is_err());
+
+        let repo = git2::Repository::open(dir.path()).unwrap();
+        for leftover in ["refs/heads/a/b", "refs/heads/lead", "refs/heads/a//b"] {
+            assert!(
+                repo.find_reference(leftover).is_err(),
+                "{leftover} non doveva essere creato"
+            );
+        }
+    }
+
+    #[test]
+    fn create_branch_refuses_a_name_that_collides_with_an_existing_branch_path() {
+        // `a` e `a/b` non possono coesistere. Lasciato a libgit2, il verso
+        // `a` -> `a/b` fallisce con un testo che cita un percorso interno
+        // di `.git`, e il verso opposto con un altro ancora: il controllo
+        // di dominio dà un messaggio solo, prima di toccare il disco.
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_a_commit(dir.path());
+        let mut real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+        real.create_branch("a").unwrap();
+        real.create_branch("x/y").unwrap();
+
+        assert_eq!(
+            real.create_branch("a/b").unwrap_err(),
+            branch_path_conflict("a/b", "a")
+        );
+        assert_eq!(
+            real.create_branch("x").unwrap_err(),
+            branch_path_conflict("x", "x/y")
+        );
+
+        let names: Vec<String> = real.branches().into_iter().map(|b| b.name).collect();
+        assert!(!names.iter().any(|n| n == "a/b" || n == "x"));
+    }
+
+    #[test]
+    fn create_branch_returns_the_name_the_repository_actually_has() {
+        // Invariante centrale: il nome nel `Branch` restituito (che finisce
+        // nel Model) deve essere uno di quelli elencati dal repository, mai
+        // una semplice eco di ciò che è stato digitato.
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_a_commit(dir.path());
+        let mut real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+
+        for name in ["feature/x", "release-1.0", "a/b/c"] {
+            let created = real.create_branch(name).unwrap();
+            assert!(
+                real.branches().iter().any(|b| b.name == created.name),
+                "{:?} non esiste nel repository",
+                created.name
+            );
+        }
+    }
+
+    #[test]
+    fn create_branch_reports_head_without_a_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(dir.path()).unwrap();
+        let mut real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+
+        let err = real.create_branch("feature/x").unwrap_err();
+
+        assert!(
+            err.to_string().contains("HEAD does not point to a commit"),
+            "messaggio poco chiaro per un repository senza commit: {err}"
+        );
+    }
+
+    #[test]
+    fn create_branch_maps_a_name_clash_found_only_on_write() {
+        // Su filesystem case-insensitive (APFS, NTFS) `feature` e `FEATURE`
+        // sono lo stesso riferimento e il conflitto emerge solo alla
+        // scrittura: il messaggio dev'essere quello di dominio, non il
+        // testo interno di libgit2. Su filesystem case-sensitive non c'è
+        // conflitto e la creazione riesce: entrambi gli esiti sono
+        // corretti, quello che non deve succedere è un errore grezzo.
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_a_commit(dir.path());
+        let mut real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+        real.create_branch("feature").unwrap();
+
+        match real.create_branch("FEATURE") {
+            Ok(created) => assert_eq!(created.name, "FEATURE"),
+            Err(err) => assert_eq!(err, branch_already_exists("FEATURE")),
+        }
+    }
+
+    #[test]
+    fn delete_branch_removes_a_local_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_a_commit(dir.path());
+        let commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("feature/x", &commit, false).unwrap();
+        let mut real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+
+        real.delete_branch("feature/x").unwrap();
+
+        assert!(real.branches().iter().all(|b| b.name != "feature/x"));
+    }
+
+    #[test]
+    fn delete_branch_refuses_an_unknown_or_malformed_name() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_a_commit(dir.path());
+        let mut real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+
+        // Stesso errore di dominio del mock, non il testo di libgit2: un
+        // nome malformato non è un riferimento che possa esistere, quindi
+        // per chi guarda la lista dei rami è il caso "non c'è".
+        assert_eq!(
+            real.delete_branch("does-not-exist").unwrap_err(),
+            branch_not_found("does-not-exist")
+        );
+        assert_eq!(
+            real.delete_branch("a..b").unwrap_err(),
+            branch_not_found("a..b")
+        );
+    }
+
+    #[test]
+    fn delete_branch_refuses_remote_branches_and_tags_and_keeps_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_a_commit(dir.path());
+        let commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.reference("refs/remotes/origin/x", commit.id(), false, "test")
+            .unwrap();
+        repo.tag_lightweight("v0.1.0", commit.as_object(), false)
+            .unwrap();
+        let mut real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+
+        for name in ["origin/x", "v0.1.0"] {
+            assert_eq!(
+                real.delete_branch(name).unwrap_err(),
+                branch_not_found(name)
+            );
+            assert!(
+                real.branches().iter().any(|b| b.name == name),
+                "{name} doveva restare nel repository"
+            );
+        }
+    }
+
+    #[test]
+    fn delete_branch_refuses_the_current_branch_and_keeps_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_a_commit(dir.path());
+        let head_name = repo.head().unwrap().shorthand().unwrap().to_string();
+        let mut real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+
+        assert_eq!(
+            real.delete_branch(&head_name).unwrap_err(),
+            current_branch_not_deletable(&head_name)
+        );
+
+        let still_there = real
+            .branches()
+            .into_iter()
+            .find(|b| b.name == head_name)
+            .expect("il ramo corrente deve restare");
+        assert!(still_there.current);
     }
 }
