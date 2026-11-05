@@ -16,7 +16,7 @@ use crate::git::repo::GitError;
 /// Evento verso `update`. Le varianti "di tasto" (`Esc`, `Enter`, ...) sono
 /// semantiche e indipendenti dal contesto: è `update` a decidere cosa
 /// significano in base allo stato corrente del `Model` (dialog aperto, menu
-/// aperto, nessuno dei due), vedi `app::dispatch_key`.
+/// aperto, nessuno dei due), vedi `dispatch_key` in `app/update.rs`.
 #[derive(Debug)]
 pub(crate) enum Msg {
     /// Scorciatoia globale (Ctrl+C o Alt+X): esce sempre, indipendentemente

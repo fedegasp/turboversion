@@ -158,9 +158,19 @@ boundary towards git (the `Repo` trait). See
 ```
 src/
 ├── main.rs          Terminal setup/teardown, entry point
-├── app.rs            Model, update() and the main loop; Model::content_mut(),
-│                     the single "panel -> data" table; HistoryEntry, the
-│                     History rows (the commits, plus the uncommitted one)
+├── app/              Model, update() and the main loop, one concern per file
+│   ├── mod.rs          Module wiring and re-exports; init_cmds()
+│   ├── panel.rs        Panel: the five panels and their Tab order
+│   ├── model/          Model and its overlays; Model::content_mut(), the
+│   │                   single "panel -> data" table; HistoryEntry, the
+│   │                   History rows (the commits, plus the uncommitted one)
+│   ├── menu.rs         The menu bar's items (MENUS) and its key handling
+│   ├── dialog_flow.rs  Dialog key handling and the Cmd an accepted dialog asks for
+│   ├── results.rs      Applies the outcome of a Cmd (a Msg from the worker)
+│   ├── update.rs       update(): Msg -> Model changes and Cmds; main-panel keys
+│   ├── run.rs          The main loop: the only file in app/ that does I/O
+│   ├── test_support.rs Test-only helpers: a Model filled with the mock data
+│   └── tests/          Tests of update()
 ├── list_panel.rs     ListPanel<T>: a list's items and its cursor as one value,
 │                     keeping the selection valid (or None on an empty list)
 ├── msg.rs            Msg (incoming events) and Cmd (requested effects)

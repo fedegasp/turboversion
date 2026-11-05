@@ -12,7 +12,7 @@
 //! `git::git2::GitRepo`, che può bloccare su I/O) è `worker::Worker` a
 //! chiamarla da un thread dedicato, fuori dal thread UI (vedi `worker.rs`).
 //! Nei test (`MockGitRepo`, in memoria, risposta immediata) `TestApp`/
-//! `model_for_tests` in `src/app.rs` la chiamano invece direttamente, nello
+//! `model_for_tests` in `src/app/` la chiamano invece direttamente, nello
 //! stesso thread, per restare deterministici e non dipendere dal timing di
 //! un thread in background.
 
