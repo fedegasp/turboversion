@@ -5,11 +5,10 @@
 // 2026-11-05 Federico Gasperini
 //
 
+use super::list_panel::ListPanel;
+use super::panel::Panel;
 use crate::dialog::Dialog;
 use crate::git::domain::{Branch, Commit, FileEntry};
-use crate::list_panel::ListPanel;
-
-use super::panel::Panel;
 
 #[derive(Clone, Copy)]
 pub(crate) struct MenuState {
@@ -19,8 +18,13 @@ pub(crate) struct MenuState {
 
 /// Overlay impilabili sopra i pannelli principali. Vivono in uno stack nel
 /// `Model`: l'overlay in cima riceve per primo gli input (vedi
-/// `update::dispatch_key`). Oggi lo stack non supera mai un elemento, ma la lettura
-/// guarda comunque solo la cima.
+/// `update::dispatch_key`) ed è l'unico che il rendering disegna.
+///
+/// Di norma ce n'è al più uno: aprire un dialog da un menu chiude il
+/// menu. Lo stack serve a chi si impila *sopra* senza sostituire, cioè
+/// all'annuncio che le operazioni git non sono più possibili: può
+/// arrivare in qualsiasi momento, anche mentre l'utente sta digitando in
+/// un dialog, e chiuderlo riporta sotto quello che c'era.
 pub(crate) enum Overlay {
     Menu(MenuState),
     Dialog(Dialog),
@@ -140,6 +144,15 @@ pub(crate) struct Model {
     /// `Model` lo cambia solo `update`. Vale 0 finché il pannello non è
     /// stato disegnato nemmeno una volta.
     pub(crate) diff_viewport: u16,
+    /// Se le operazioni git sono ancora possibili. Diventa falso quando il
+    /// thread che le esegue non c'è più (vedi `Msg::WorkerLost`): da quel
+    /// momento i dati già letti restano validi e navigabili, ma nessuna
+    /// nuova lettura o scrittura arriverà mai al repository.
+    ///
+    /// È privato e si spegne solo da `lose_git`, che è anche ciò che
+    /// rende l'annuncio all'utente irripetibile: tenere il conto fuori di
+    /// qui vorrebbe dire fidarsi di chi chiama.
+    git_available: bool,
     pub(crate) overlays: Vec<Overlay>,
 }
 
@@ -148,30 +161,55 @@ impl Model {
         Self {
             running: true,
             focus: Panel::History,
-            local_branches: ListPanel::default(),
-            remote_branches: ListPanel::default(),
+            local_branches: ListPanel::empty(),
+            remote_branches: ListPanel::empty(),
             commits: Vec::new(),
             working_copy_dirty: false,
-            history: ListPanel::default(),
-            files: ListPanel::default(),
+            history: ListPanel::empty(),
+            files: ListPanel::empty(),
             diff: Vec::new(),
             diff_scroll: 0,
             diff_viewport: 0,
+            git_available: true,
             overlays: Vec::new(),
         }
     }
 
+    /// Se le operazioni git sono ancora possibili. Lo legge la barra di
+    /// stato, che è l'unico posto a ricordarlo dopo che il dialog
+    /// d'annuncio è stato chiuso.
+    pub(crate) fn git_available(&self) -> bool {
+        self.git_available
+    }
+
+    /// Registra che le operazioni git non sono più possibili.
+    /// Restituisce `true` solo la prima volta: le chiamate successive non
+    /// cambiano nulla, così chi chiama può annunciare la perdita una
+    /// volta sola senza tenere conti propri.
+    pub(super) fn lose_git(&mut self) -> bool {
+        let first = self.git_available;
+        self.git_available = false;
+        first
+    }
+
     /// Il contenuto del pannello `panel`, prestato dal `Model`: vedi
     /// `PanelContent`. Lo usano sia `update` (per muovere il cursore del
-    /// pannello a fuoco) sia `ui::view_model` (per sapere cosa disegnare),
-    /// così la corrispondenza pannello -> dati resta scritta una volta
-    /// sola. Il prestito è esclusivo perché il rendering di ratatui
-    /// aggiorna il `ListState` (l'offset di scorrimento) mentre disegna.
+    /// pannello a fuoco) sia il rendering (per sapere cosa disegnare), così
+    /// la corrispondenza pannello -> dati resta scritta una volta sola. Il
+    /// prestito è esclusivo perché il rendering di ratatui aggiorna il
+    /// `ListState` (l'offset di scorrimento) mentre disegna.
     ///
-    /// È `pub(crate)` perché `ui` ne ha bisogno, ma da lì l'unico chiamante
-    /// ammesso è `ui::view_model`: un pannello che lo invocasse
-    /// direttamente otterrebbe un `&mut ListPanel` e potrebbe modificare il
-    /// `Model` mentre disegna.
+    /// È `pub(crate)` perché `ui` ne ha bisogno, e chiamarla da lì non
+    /// apre la strada a modificare le liste del `Model`: i metodi che
+    /// cambiano elementi e selezione — e i costruttori con cui si potrebbe
+    /// sovrascrivere la lista intera — sono visibili solo dentro
+    /// `crate::app`, quindi il `&mut ListPanel` che ne esce serve a
+    /// leggere e a prestare il cursore a ratatui, non ad altro. Fa
+    /// eccezione lo scorrimento del Diff, un `&mut u16`.
+    ///
+    /// Vale per questa via, non per `ui` nel suo insieme: chi ha in mano un
+    /// `&mut Model` — cioè `ui::view` e `ui::draw_panel`, non i pannelli —
+    /// può comunque scrivere i campi `pub(crate)` del `Model`.
     pub(crate) fn content_mut(&mut self, panel: Panel) -> PanelContent<'_> {
         match panel {
             Panel::Branches => PanelContent::Branches(&mut self.local_branches),
@@ -184,6 +222,29 @@ impl Model {
                 viewport: self.diff_viewport,
             },
         }
+    }
+
+    /// Il ramo su cui agisce un'azione sui rami che non lo nomina (una
+    /// voce di menu, domani una scorciatoia): quello selezionato nel
+    /// pannello a fuoco, se è uno dei due che elencano rami; quello
+    /// selezionato in "Branches" se il focus è altrove, dove "Branches" è
+    /// il pannello di riferimento. `None` se la lista da cui si pesca è
+    /// vuota, cioè se non c'è alcun ramo puntato.
+    ///
+    /// Sta qui, accanto a `content_mut`, perché è di nuovo la domanda
+    /// "quale pannello mostra quale dato", vista dal lato di chi agisce;
+    /// il match è esaustivo, così un pannello nuovo costringe a dire da
+    /// quale lista di rami pesca.
+    ///
+    /// Chi chiama decide poi *cosa* fare guardando il ramo restituito —
+    /// il suo `kind`, se è il ramo corrente — e non il focus: il focus
+    /// serve solo a scegliere il ramo.
+    pub(super) fn target_branch(&self) -> Option<&Branch> {
+        let branches = match self.focus {
+            Panel::Remotes => &self.remote_branches,
+            Panel::Branches | Panel::History | Panel::Changes | Panel::Diff => &self.local_branches,
+        };
+        branches.selected()
     }
 
     /// L'unico ingresso per ciò che il pannello History mostra: registra
@@ -256,5 +317,7 @@ impl Default for Model {
     }
 }
 
+#[cfg(test)]
+mod content_tests;
 #[cfg(test)]
 mod history_tests;

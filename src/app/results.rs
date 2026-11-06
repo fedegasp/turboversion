@@ -5,10 +5,21 @@
 // 2026-11-05 Federico Gasperini
 //
 
-use crate::dialog::{Action, Dialog};
+//! Applica al `Model` gli esiti dei `Cmd`: i `Msg` che il `Worker` rimanda
+//! dopo aver interrogato `Repo`.
+//!
+//! Regola per i prossimi `apply_*`: qui ci sta la risposta a un `Msg`
+//! prodotto dal worker in esito a un `Cmd` — asincrono, fallibile, con
+//! dentro dati letti dal repository. Un `Msg` che nasce invece dentro il
+//! processo della UI (un tasto, una misura del layout) si gestisce nel file
+//! che lo interpreta — `update.rs` per i tasti dei pannelli,
+//! `dialog_flow.rs` per quelli dei dialog, `menu.rs` per il menu — dove
+//! l'effetto è immediato: sul `Model`, o sul `Cmd` da restituire.
+
 use crate::git::domain::{Branch, BranchKind, Commit, FileEntry};
 use crate::git::repo::GitError;
 
+use super::dialogs;
 use super::model::{Model, Overlay};
 
 pub(super) fn apply_loaded(
@@ -65,16 +76,9 @@ pub(super) fn apply_branch_created(
             model.local_branches.push_selected(branch);
         }
         Err(err) => {
-            // Riapre il dialog con il testo già digitato, invece di un
-            // messaggio d'errore che lo scarterebbe e costringerebbe a
-            // ridigitarlo da capo.
-            let mut d = Dialog::input(
-                "New branch",
-                format!("Branch name:\n{err}"),
-                Action::NewBranch,
-            );
-            d.input = name;
-            model.overlays.push(Overlay::Dialog(d));
+            model
+                .overlays
+                .push(Overlay::Dialog(dialogs::new_branch_retry(name, &err)));
         }
     }
 }
@@ -88,10 +92,9 @@ pub(super) fn apply_branch_deleted(model: &mut Model, name: String, result: Resu
             model.local_branches.retain(|b| b.name != name);
         }
         Err(err) => {
-            model.overlays.push(Overlay::Dialog(Dialog::info(
-                "Delete branch",
-                err.to_string(),
-            )));
+            model
+                .overlays
+                .push(Overlay::Dialog(dialogs::delete_branch_failed(&err)));
         }
     }
 }

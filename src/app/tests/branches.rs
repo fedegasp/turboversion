@@ -213,3 +213,86 @@ fn each_branch_panel_moves_only_its_own_selection() {
         "i remoti non si muovono"
     );
 }
+
+/// Il ramo su cui agiscono le azioni sui rami è quello puntato nel
+/// pannello a fuoco quando quel pannello elenca rami, e quello di
+/// "Branches" in tutti gli altri casi.
+#[test]
+fn the_targeted_branch_comes_from_the_focused_branch_panel_or_from_branches() {
+    let mut app = TestApp::new();
+    let i = local_position(&app, "develop");
+    app.local_branches.select(i);
+
+    for focus in [Panel::Branches, Panel::History, Panel::Changes, Panel::Diff] {
+        app.focus = focus;
+        assert_eq!(
+            app.target_branch().map(|b| b.name.as_str()),
+            Some("develop"),
+            "con il focus su {focus:?} il ramo è quello di Branches"
+        );
+    }
+
+    app.focus = Panel::Remotes;
+    let remote = app.remote_branches.selected().map(|b| b.name.clone());
+    assert_eq!(
+        app.target_branch().map(|b| b.name.clone()),
+        remote,
+        "con il focus su Remotes il ramo è quello puntato lì"
+    );
+    assert_eq!(
+        app.target_branch().map(|b| b.kind),
+        Some(BranchKind::Remote)
+    );
+}
+
+/// Il rifiuto è una proprietà del ramo puntato, non del pannello a
+/// fuoco. Con il focus su "Remotes" ma senza alcun remoto non c'è nessun
+/// ramo remoto da rifiutare: la risposta giusta è che non c'è selezione.
+/// Quel che non deve succedere, in nessuno dei due casi, è cancellare il
+/// ramo locale selezionato nell'altro pannello.
+#[test]
+fn with_an_empty_remotes_panel_focused_there_is_no_branch_to_refuse() {
+    let mut app = TestApp::new();
+    let locals = app.local_branches.items().to_vec();
+    let n = locals.len();
+    update(
+        &mut app.model,
+        Msg::Loaded {
+            branches: locals,
+            commits: Vec::new(),
+            files: Vec::new(),
+            diff: Vec::new(),
+        },
+    );
+    assert!(app.remote_branches.is_empty());
+    app.focus = Panel::Remotes;
+
+    run_menu_action(&mut app, MenuAction::DeleteBranch);
+    let d = app.dialog().expect("un messaggio, non una conferma");
+    assert_eq!(d.kind, crate::dialog::Kind::Message);
+    assert!(d.text.contains("No branch selected"), "{:?}", d.text);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.local_branches.len(), n, "nessun locale cancellato");
+}
+
+/// Lo stesso criterio dal lato opposto: con il focus su un pannello che non
+/// elenca rami la decisione segue il ramo di "Branches", compreso il suo
+/// nome nella conferma — il focus non entra nel merito.
+#[test]
+fn delete_from_a_non_branch_panel_confirms_on_the_branch_selected_in_branches() {
+    let mut app = TestApp::new();
+    let i = local_position(&app, "feature/menu");
+    app.local_branches.select(i);
+    app.focus = Panel::Diff;
+
+    run_menu_action(&mut app, MenuAction::DeleteBranch);
+    let d = app.dialog().expect("la conferma di cancellazione");
+    assert_eq!(d.kind, crate::dialog::Kind::Confirm);
+    assert!(d.text.contains("feature/menu"), "{:?}", d.text);
+    press(&mut app, KeyCode::Char('y'));
+    assert!(app
+        .local_branches
+        .items()
+        .iter()
+        .all(|b| b.name != "feature/menu"));
+}

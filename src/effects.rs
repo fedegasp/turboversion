@@ -19,6 +19,10 @@
 use crate::git::repo::Repo;
 use crate::msg::{Cmd, Msg};
 
+/// Un `Cmd` entra, un `Msg` esce: sempre uno, mai zero né due. Su questo
+/// si regge il conto dei `Cmd` in volo che il ciclo principale usa per
+/// decidere quanto attendere (vedi `app::run`); se un giorno il tipo di
+/// ritorno diventasse `Vec<Msg>`, è quel conto il punto che si rompe.
 pub(crate) fn run(cmd: Cmd, repo: &mut dyn Repo) -> Msg {
     match cmd {
         Cmd::LoadAll => Msg::Loaded {

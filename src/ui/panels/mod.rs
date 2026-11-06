@@ -6,9 +6,9 @@
 //
 
 //! Rendering dei singoli pannelli: ciascun modulo riceve per parametro i
-//! dati da disegnare — scelti da `ui::view_model`, che li prende dal
-//! `Model` — e decide solo come appaiono: colori, troncamenti, larghezza
-//! delle colonne. Nessuno di essi legge il `Model` né chiama `git/`: così
+//! dati da disegnare — presi dal `Model` da `ui::draw_panel`, che li chiede
+//! a `Model::content_mut` — e decide solo come appaiono: colori,
+//! troncamenti, larghezza delle colonne. Nessuno di essi legge il `Model` né chiama `git/`: così
 //! `branches` può servire due pannelli, `history` una lista di righe che
 //! non sono tutte commit, e nessun pannello può modificare lo stato
 //! dell'applicazione mentre disegna.

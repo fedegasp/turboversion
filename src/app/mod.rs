@@ -12,6 +12,8 @@
 //! giro successivo di `run`.
 
 mod dialog_flow;
+mod dialogs;
+mod list_panel;
 mod menu;
 mod model;
 mod panel;

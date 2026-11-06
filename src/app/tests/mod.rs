@@ -21,6 +21,7 @@ mod branches;
 mod diff;
 mod overlays;
 mod panels;
+mod worker_loss;
 
 /// Replica il ciclo di `run` (traduzione del tasto, `update`, eventuali
 /// effetti contro un `MockGitRepo`) per i test, esponendo il `Model`

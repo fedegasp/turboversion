@@ -1,5 +1,5 @@
 //
-// src/list_panel.rs
+// src/app/list_panel.rs
 // TurboVersion
 //
 // 2026-11-04 Federico Gasperini
@@ -18,7 +18,16 @@
 //! > la selezione è `None` se e solo se la lista è vuota; altrimenti è
 //! > sempre un indice valido.
 //!
-//! Il tipo sta fuori da `ui/` perché lo usano sia `update` sia `view`: il
+//! Il tipo vive dentro `app` perché è lì che si trova chi ha il diritto di
+//! modificarlo: tutto ciò che cambia la lista o la selezione è
+//! `pub(in crate::app)`, mentre a `ui` restano la lettura e `parts_mut`,
+//! l'unica via d'uscita del `ListState` (che ratatui aggiorna mentre
+//! disegna). "Solo `update` muta il Model" non è quindi una disciplina da
+//! ricordare: un pannello che chiamasse `set`, `retain` o `push_selected`
+//! non compila. Una visibilità `pub(in crate::app)` è legale solo se il
+//! modulo sta dentro `crate::app`, da cui la collocazione.
+//!
+//! Il tipo non sta in `ui/` perché lo usano sia `update` sia `view`: il
 //! `ListState` è lo stato di selezione *e* di scorrimento che ratatui
 //! aggiorna durante il rendering, e che deve sopravvivere da un frame al
 //! successivo.
@@ -31,11 +40,37 @@ pub(crate) struct ListPanel<T> {
 }
 
 impl<T> ListPanel<T> {
+    /// Costruisce la lista con il cursore sulla prima riga (su nessuna
+    /// riga, se `items` è vuoto).
+    ///
+    /// È un costruttore inerente e non un `impl From<Vec<T>>` perché un
+    /// trait pubblico non si può restringere: `From` e `Default`
+    /// resterebbero raggiungibili da `ui`, e chi avesse in mano un
+    /// `&mut ListPanel` potrebbe svuotare la lista con un `*list =
+    /// ListPanel::default()` aggirando i metodi ristretti qui sotto.
+    pub(in crate::app) fn new(items: Vec<T>) -> Self {
+        // Un `Some(0)` incondizionato indicherebbe una riga inesistente, e
+        // chi usasse quell'indice per raggiungere l'elemento finirebbe
+        // fuori dai limiti (una lista vuota è normale: un repository senza
+        // modifiche o senza rami remoti).
+        let selected = (!items.is_empty()).then_some(0);
+        Self {
+            items,
+            state: ListState::default().with_selected(selected),
+        }
+    }
+
+    /// Una lista vuota, senza selezione: lo stato di partenza di ogni
+    /// pannello, prima che il repository venga letto.
+    pub(in crate::app) fn empty() -> Self {
+        Self::new(Vec::new())
+    }
+
     /// Sostituisce il contenuto e riporta il cursore sulla prima riga (su
     /// nessuna riga, se la lista arriva vuota): una lista più corta non può
     /// quindi lasciare la selezione fuori dai limiti.
-    pub(crate) fn set(&mut self, items: Vec<T>) {
-        *self = Self::from(items);
+    pub(in crate::app) fn set(&mut self, items: Vec<T>) {
+        *self = Self::new(items);
     }
 
     pub(crate) fn items(&self) -> &[T] {
@@ -60,7 +95,7 @@ impl<T> ListPanel<T> {
         self.selected_index().and_then(|i| self.items().get(i))
     }
 
-    pub(crate) fn selected_mut(&mut self) -> Option<&mut T> {
+    pub(in crate::app) fn selected_mut(&mut self) -> Option<&mut T> {
         let i = self.selected_index()?;
         self.items.get_mut(i)
     }
@@ -82,7 +117,7 @@ impl<T> ListPanel<T> {
 
     /// Muove il cursore di `delta` righe, fermandosi ai bordi. Su una lista
     /// vuota non c'è nulla da muovere.
-    pub(crate) fn step(&mut self, delta: i32) {
+    pub(in crate::app) fn step(&mut self, delta: i32) {
         if self.is_empty() {
             return;
         }
@@ -93,14 +128,14 @@ impl<T> ListPanel<T> {
     }
 
     /// Aggiunge un elemento in coda e lo seleziona.
-    pub(crate) fn push_selected(&mut self, item: T) {
+    pub(in crate::app) fn push_selected(&mut self, item: T) {
         self.items.push(item);
         self.state.select(Some(self.len() - 1));
     }
 
     /// Tiene solo gli elementi che soddisfano `keep`, riportando il cursore
     /// nei limiti della lista rimasta.
-    pub(crate) fn retain(&mut self, keep: impl FnMut(&T) -> bool) {
+    pub(in crate::app) fn retain(&mut self, keep: impl FnMut(&T) -> bool) {
         self.items.retain(keep);
         let last = self.len().checked_sub(1);
         let selected = self.selected_index().zip(last).map(|(s, l)| s.min(l));
@@ -109,31 +144,13 @@ impl<T> ListPanel<T> {
 
     /// Porta il cursore su `index`, limitato all'ultima riga esistente; su
     /// una lista vuota non seleziona nulla. Serve ai test che posizionano la
-    /// selezione senza passare da `update`.
+    /// selezione senza passare da `update`, compresi quelli di rendering in
+    /// `ui`: è l'unico metodo che muta e resta `pub(crate)`, ma essendo
+    /// compilato solo nei test non allenta il vincolo sul codice vero.
     #[cfg(test)]
     pub(crate) fn select(&mut self, index: usize) {
         let last = self.len().checked_sub(1);
         self.state.select(last.map(|l| index.min(l)));
-    }
-}
-
-impl<T> From<Vec<T>> for ListPanel<T> {
-    fn from(items: Vec<T>) -> Self {
-        // Un `Some(0)` incondizionato indicherebbe una riga inesistente, e
-        // chi usasse quell'indice per raggiungere l'elemento finirebbe
-        // fuori dai limiti (una lista vuota è normale: un repository senza
-        // modifiche o senza rami remoti).
-        let selected = (!items.is_empty()).then_some(0);
-        Self {
-            items,
-            state: ListState::default().with_selected(selected),
-        }
-    }
-}
-
-impl<T> Default for ListPanel<T> {
-    fn default() -> Self {
-        Self::from(Vec::new())
     }
 }
 
@@ -142,7 +159,7 @@ mod tests {
     use super::*;
 
     fn panel(n: usize) -> ListPanel<usize> {
-        ListPanel::from((0..n).collect::<Vec<_>>())
+        ListPanel::new((0..n).collect::<Vec<_>>())
     }
 
     #[test]

@@ -51,6 +51,13 @@ pub(crate) enum Msg {
     /// `Model` per la stessa porta di ogni altro evento, e `update` resta
     /// l'unico a scriverlo.
     DiffViewport(u16),
+    /// Il thread che esegue i `Cmd` non c'è più: nessun `Cmd` già inviato
+    /// produrrà un esito e nessuno dei prossimi verrà eseguito. Lo emette
+    /// il ciclo principale quando il canale verso il worker risulta
+    /// chiuso (vedi `worker::Received`): la perdita entra nel `Model` per
+    /// la stessa porta di ogni altro evento, invece di restare un effetto
+    /// collaterale muto.
+    WorkerLost,
     /// Esito di `Cmd::LoadAll`: i dati iniziali letti da `Repo`.
     Loaded {
         branches: Vec<Branch>,

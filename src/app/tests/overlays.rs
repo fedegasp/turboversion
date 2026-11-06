@@ -78,6 +78,83 @@ fn altgr_like_combo_is_not_swallowed_as_a_menu_shortcut() {
     assert_eq!(app.dialog().unwrap().input, "e");
 }
 
+/// Il menu aperto, come coppia `(menu, voce)`.
+fn menu_state(app: &TestApp) -> (usize, usize) {
+    let m = app.menu().expect("il menu è rimasto aperto");
+    (m.menu, m.item)
+}
+
+/// Ultima voce del menu `menu`, letta da `MENUS`: gli indici attesi non
+/// sono scritti a mano, così aggiungere una voce non rompe i test.
+fn last_item(menu: usize) -> usize {
+    let (_, items) = MENUS[menu];
+    items.len() - 1
+}
+
+#[test]
+fn left_and_right_wrap_around_the_menu_bar_and_reset_the_item() {
+    let last_menu = MENUS.len() - 1;
+    let mut app = TestApp::new();
+    app.overlays.push(Overlay::Menu(MenuState {
+        menu: 0,
+        item: last_item(0),
+    }));
+
+    press(&mut app, KeyCode::Left);
+    assert_eq!(
+        menu_state(&app),
+        (last_menu, 0),
+        "dal primo menu si passa all'ultimo, sulla sua prima voce"
+    );
+
+    press(&mut app, KeyCode::Right);
+    assert_eq!(
+        menu_state(&app),
+        (0, 0),
+        "dall'ultimo menu si torna al primo"
+    );
+}
+
+#[test]
+fn up_and_down_wrap_around_the_items_of_the_open_menu() {
+    let (menu, _) = menu_position(MenuAction::Quit);
+    let last = last_item(menu);
+    let mut app = TestApp::new();
+    app.overlays
+        .push(Overlay::Menu(MenuState { menu, item: 0 }));
+
+    press(&mut app, KeyCode::Up);
+    assert_eq!(
+        menu_state(&app),
+        (menu, last),
+        "dalla prima voce si passa all'ultima dello stesso menu"
+    );
+
+    press(&mut app, KeyCode::Down);
+    assert_eq!(
+        menu_state(&app),
+        (menu, 0),
+        "dall'ultima si torna alla prima"
+    );
+}
+
+#[test]
+fn vertical_keys_count_the_items_of_the_menu_not_the_menus() {
+    // Il menu di "About" ha una voce sola: `Up` deve restare lì, non
+    // spostarsi su una voce che esiste solo nella barra dei menu.
+    let (menu, _) = menu_position(MenuAction::About);
+    let last = last_item(menu);
+    let mut app = TestApp::new();
+    app.overlays
+        .push(Overlay::Menu(MenuState { menu, item: 0 }));
+
+    press(&mut app, KeyCode::Up);
+    assert_eq!(menu_state(&app), (menu, last));
+
+    press(&mut app, KeyCode::Down);
+    assert_eq!(menu_state(&app), (menu, 0));
+}
+
 #[test]
 fn unimplemented_items_report_it() {
     let mut app = TestApp::new();

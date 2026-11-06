@@ -5,10 +5,10 @@
 // 2026-11-05 Federico Gasperini
 //
 
-use crate::dialog::{Action, Dialog};
 use crate::msg::{Cmd, Msg};
 
 use super::dialog_flow::ask_delete_branch;
+use super::dialogs;
 use super::model::{MenuState, Model, Overlay};
 
 /// Azione associata a una voce di menu. Il dispatch in `activate` avviene su
@@ -81,58 +81,72 @@ pub(super) fn open_menu_by_hotkey(model: &mut Model, c: char) {
     }
 }
 
+/// Gestisce i tasti mentre il menu è l'overlay in cima: `Esc` e `F10` lo
+/// chiudono, le frecce spostano la selezione fra i menu e fra le voci,
+/// `Enter` attiva la voce selezionata e chiude il menu. Non restituisce mai
+/// un `Cmd`: l'attivazione al più impila un dialog, e l'effetto nasce dopo,
+/// quando quel dialog viene accettato.
 pub(super) fn update_menu(model: &mut Model, msg: Msg) -> Vec<Cmd> {
-    let Some(&Overlay::Menu(mut m)) = model.overlays.last() else {
+    let Some(Overlay::Menu(m)) = model.overlays.last_mut() else {
         return Vec::new();
     };
-    let n_menus = MENUS.len();
-    let n_items = MENUS[m.menu].1.len();
+    let Some(&(_, items)) = MENUS.get(m.menu) else {
+        return Vec::new();
+    };
     match msg {
         Msg::Esc | Msg::F10 => {
             model.overlays.pop();
-            return Vec::new();
         }
         Msg::Left => {
-            m.menu = (m.menu + n_menus - 1) % n_menus;
+            m.menu = prev_index(m.menu, MENUS.len());
             m.item = 0;
         }
         Msg::Right => {
-            m.menu = (m.menu + 1) % n_menus;
+            m.menu = next_index(m.menu, MENUS.len());
             m.item = 0;
         }
-        Msg::Up => m.item = (m.item + n_items - 1) % n_items,
-        Msg::Down => m.item = (m.item + 1) % n_items,
+        // `items` è il menu corrente: il suo conteggio vale qui, mentre
+        // `Left`/`Right` cambiano menu e riportano la voce a zero.
+        Msg::Up => m.item = prev_index(m.item, items.len()),
+        Msg::Down => m.item = next_index(m.item, items.len()),
         Msg::Enter => {
+            let Some(&(label, action)) = items.get(m.item) else {
+                return Vec::new();
+            };
+            // `pop` vuole lo stack in esclusiva: la voce va letta prima.
             model.overlays.pop();
-            let (label, action) = MENUS[m.menu].1[m.item];
             activate(model, label, action);
-            return Vec::new();
         }
         _ => {}
     }
-    *model
-        .overlays
-        .last_mut()
-        .expect("il top era un Menu un istante fa") = Overlay::Menu(m);
     Vec::new()
+}
+
+/// Indice precedente in un elenco circolare di `len` voci; su un elenco
+/// vuoto non c'è nessuna voce su cui tornare e resta `0`.
+fn prev_index(i: usize, len: usize) -> usize {
+    if i == 0 {
+        len.saturating_sub(1)
+    } else {
+        i - 1
+    }
+}
+
+/// Indice successivo in un elenco circolare di `len` voci; su un elenco
+/// vuoto non c'è nessuna voce su cui avanzare e resta `0`.
+fn next_index(i: usize, len: usize) -> usize {
+    if i + 1 >= len {
+        0
+    } else {
+        i + 1
+    }
 }
 
 fn activate(model: &mut Model, label: &str, action: MenuAction) {
     match action {
         MenuAction::Quit => model.running = false,
-        MenuAction::About => {
-            model.overlays.push(Overlay::Dialog(Dialog::info(
-                "About",
-                "TurboVersion\nTurbo Vision meets version control.",
-            )));
-        }
-        MenuAction::NewBranch => {
-            model.overlays.push(Overlay::Dialog(Dialog::input(
-                "New branch",
-                "Branch name:",
-                Action::NewBranch,
-            )));
-        }
+        MenuAction::About => model.overlays.push(Overlay::Dialog(dialogs::about())),
+        MenuAction::NewBranch => model.overlays.push(Overlay::Dialog(dialogs::new_branch())),
         MenuAction::DeleteBranch => ask_delete_branch(model),
         MenuAction::OpenRepository
         | MenuAction::CloneRepository
@@ -142,10 +156,9 @@ fn activate(model: &mut Model, label: &str, action: MenuAction) {
         | MenuAction::Stash
         | MenuAction::ZoomPanel
         | MenuAction::Refresh => {
-            model.overlays.push(Overlay::Dialog(Dialog::info(
-                "Not implemented",
-                format!("\"{label}\" is not available yet."),
-            )));
+            model
+                .overlays
+                .push(Overlay::Dialog(dialogs::not_implemented(label)));
         }
     }
 }

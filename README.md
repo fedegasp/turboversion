@@ -76,15 +76,15 @@ Vision touches.
 
 - [x] Replace mock data with real repository data (via `git2`): branches,
       commit log, working-tree status, diffs.
+- [x] Show the uncommitted working copy on top of the history.
+- [x] Branch creation/deletion (local branches). Checkout still missing.
+- [ ] Make Changes and Diff follow the History selection: the working copy
+      for the uncommitted row, the files and diff of the commit otherwise.
+- [ ] Stage/unstage and commit from the UI.
 - [ ] Wire up the remaining menu actions. Working so far: `File > Quit`,
       `Help > About`, `Branch > New branch...` and `Branch > Delete` (both
       now change the repository for real); the rest show a "not available
       yet" dialog.
-- [x] Show the uncommitted working copy on top of the history.
-- [ ] Make Changes and Diff follow the History selection: the working copy
-      for the uncommitted row, the files and diff of the commit otherwise.
-- [ ] Stage/unstage and commit from the UI.
-- [x] Branch creation/deletion (local branches). Checkout still missing.
 - [ ] Repository picker (`File > Open repository...`, `Clone...`).
 
 ## Getting started
@@ -127,10 +127,14 @@ cargo test
 > use an emulator that does this by default, e.g. iTerm2). `F10` and
 > `Ctrl+C` always work regardless of this setting.
 
-> **Note:** `Branch > Delete` always acts on the selection of the *Branches*
-> panel, wherever the focus is — except when the Remotes panel is focused,
-> where it is refused with a message instead of deleting a local branch you
-> weren't looking at.
+> **Note:** `Branch > Delete` acts on the branch selected in the focused
+> panel when that panel lists branches — *Remotes* when it has the focus,
+> *Branches* otherwise, including when the focus is on History, Changes or
+> Diff. What happens next depends on that branch and not on the focus: a
+> remote-tracking branch is refused with a message, the current branch is
+> refused too, any other local branch is deleted after a confirmation. With
+> the Remotes panel focused but empty there is no branch to act on, so the
+> message is "No branch selected." instead.
 
 > **Note:** the History selection is reset to the top row whenever the
 > repository is read again, so it doesn't survive a reload yet.
@@ -138,6 +142,16 @@ cargo test
 > **Note:** the Diff panel does not wrap long lines: it cuts them at the
 > right edge, like `less -S`. There is no horizontal scrolling, so the tail
 > of a line wider than the panel can't be read.
+
+> **Note:** git work happens on a worker thread. If that thread dies — a
+> defect in the backend, or in `git2` itself — the app does not quit: it says
+> so once with a "Git unavailable" dialog, then keeps a `!` marker at the
+> head of the status bar. Branches, log, files and diff already read stay on
+> screen and can still be browsed; they just don't refresh any more, and any
+> action that would need git is refused with that same message instead of
+> failing silently. Restart to use git again. The refusal names the condition
+> but not the action refused, so a confirmed "Delete branch" turns into a bare
+> "Git unavailable", and text typed into "New branch" is lost.
 
 ### Dialogs
 
@@ -161,9 +175,15 @@ src/
 ├── app/              Model, update() and the main loop, one concern per file
 │   ├── mod.rs          Module wiring and re-exports; init_cmds()
 │   ├── panel.rs        Panel: the five panels and their Tab order
+│   ├── list_panel.rs   ListPanel<T>: a list's items and its cursor as one
+│   │                   value, keeping the selection valid (or None on an
+│   │                   empty list); whatever changes them is visible only
+│   │                   inside app/, so drawing can't
 │   ├── model/          Model and its overlays; Model::content_mut(), the
 │   │                   single "panel -> data" table; HistoryEntry, the
 │   │                   History rows (the commits, plus the uncommitted one)
+│   ├── dialogs.rs      Every dialog the app can show, built in one place:
+│   │                   one function per dialog, private to app/
 │   ├── menu.rs         The menu bar's items (MENUS) and its key handling
 │   ├── dialog_flow.rs  Dialog key handling and the Cmd an accepted dialog asks for
 │   ├── results.rs      Applies the outcome of a Cmd (a Msg from the worker)
@@ -171,8 +191,6 @@ src/
 │   ├── run.rs          The main loop: the only file in app/ that does I/O
 │   ├── test_support.rs Test-only helpers: a Model filled with the mock data
 │   └── tests/          Tests of update()
-├── list_panel.rs     ListPanel<T>: a list's items and its cursor as one value,
-│                     keeping the selection valid (or None on an empty list)
 ├── msg.rs            Msg (incoming events) and Cmd (requested effects)
 ├── effects.rs        Runs a Cmd against Repo, produces the resulting Msg
 ├── worker.rs         Worker thread owning the Repo, so git never blocks the UI
@@ -188,8 +206,9 @@ src/
 └── ui/
     ├── mod.rs        view(): panel layout and render dispatch; reports the
     │                 height of the Diff panel back to update() as a Msg
-    ├── view_model.rs Model -> what to draw: which rows and key hints each
-    │                 panel gets (the panels decide how they look)
+    ├── hints.rs      The key hints for the status bar, as a function of the
+    │                 Model's state (rows come straight from
+    │                 Model::content_mut, matched in mod.rs)
     ├── theme.rs      Turbo Vision color palette and styles
     ├── text.rs       Text-fitting helpers
     ├── panels/       Branches, Remotes, History, Changes, Diff, menubar,

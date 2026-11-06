@@ -6,10 +6,11 @@
 //
 
 use crate::dialog::{Action, Dialog};
+use crate::git::domain::BranchKind;
 use crate::msg::{Cmd, Msg};
 
+use super::dialogs;
 use super::model::{Model, Overlay};
-use super::panel::Panel;
 
 pub(super) fn update_dialog(model: &mut Model, msg: Msg) -> Vec<Cmd> {
     let Some(Overlay::Dialog(dialog)) = model.overlays.last_mut() else {
@@ -18,8 +19,10 @@ pub(super) fn update_dialog(model: &mut Model, msg: Msg) -> Vec<Cmd> {
     let Some(accepted) = dialog.on_msg(msg) else {
         return Vec::new();
     };
+    // Il dialog esce comunque dallo stack; un overlay di altro tipo in cima
+    // non produce effetti.
     let Some(Overlay::Dialog(dialog)) = model.overlays.pop() else {
-        unreachable!("appena verificato Some(Overlay::Dialog(_)) poche righe sopra")
+        return Vec::new();
     };
     if accepted {
         apply_dialog(dialog)
@@ -28,40 +31,27 @@ pub(super) fn update_dialog(model: &mut Model, msg: Msg) -> Vec<Cmd> {
     }
 }
 
-/// Chiede conferma per cancellare il ramo selezionato nel pannello
-/// "Branches". L'operazione guarda sempre quella selezione, anche con il
-/// focus altrove, come è normale per una voce di menu. L'eccezione è
-/// "Remotes": è l'altro pannello che elenca rami, quindi è l'unico in cui
-/// "Delete" sarebbe ambiguo su quale dei due elenchi stia agendo. Lì si
-/// rifiuta invece di cancellare un ramo a cui l'utente non stava pensando.
+/// Chiede conferma per cancellare un ramo. Il ramo su cui l'azione agisce
+/// è quello che `Model::target_branch` indica: la selezione del pannello a
+/// fuoco quando elenca rami, quella di "Branches" altrimenti, come è
+/// normale per una voce di menu azionata con il focus da un'altra parte.
+///
+/// La risposta dipende poi solo da quel ramo, non da dove si trova il
+/// focus: un remoto non si cancella da qui, il ramo corrente nemmeno, e
+/// senza alcun ramo puntato non c'è niente da cancellare. Una scorciatoia
+/// contestuale che chiamasse questa funzione otterrebbe quindi la stessa
+/// decisione, senza doverla ripensare.
 pub(super) fn ask_delete_branch(model: &mut Model) {
-    if model.focus == Panel::Remotes {
-        model.overlays.push(Overlay::Dialog(Dialog::info(
-            "Delete branch",
-            "Remote branches cannot be deleted here.",
-        )));
-        return;
-    }
-    let Some(b) = model.local_branches.selected() else {
-        model.overlays.push(Overlay::Dialog(Dialog::info(
-            "Delete branch",
-            "No branch selected.",
-        )));
-        return;
-    };
-    let dialog = if b.current {
-        Dialog::info(
-            "Delete branch",
-            format!("Cannot delete the current branch '{}'.", b.name),
-        )
-    } else {
-        let mut d = Dialog::confirm(
-            "Delete branch",
-            format!("Delete branch '{}'?", b.name),
-            Action::DeleteBranch(b.name.clone()),
-        );
-        d.button = 1; // azione distruttiva: default su "No"
-        d
+    let dialog = match model.target_branch() {
+        None => dialogs::delete_branch_none_selected(),
+        // I tag non compaiono in nessun pannello, quindi non possono
+        // essere il ramo puntato; stanno con i remoti perché come loro
+        // non sono rami locali, gli unici che l'app cancella.
+        Some(b) => match b.kind {
+            BranchKind::Remote | BranchKind::Tag => dialogs::delete_branch_refused_remote(),
+            BranchKind::Local if b.current => dialogs::delete_branch_refused_current(&b.name),
+            BranchKind::Local => dialogs::delete_branch_confirm(&b.name),
+        },
     };
     model.overlays.push(Overlay::Dialog(dialog));
 }

@@ -15,3 +15,13 @@ unicode-width = "0.2"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+
+[profile.release]
+# Esplicito anche se è il default, perché cambiarlo romperebbe due cose in
+# silenzio e solo in release. Il thread worker cattura i propri panic con
+# `catch_unwind` per non srotolare mentre la UI disegna: con `abort` quella
+# cattura non esisterebbe più. E il ripristino del terminale (raw mode,
+# schermo alternativo) passa dall'hook di panic e dallo srotolamento: con
+# `abort` il processo se ne andrebbe lasciando il terminale smontato, senza
+# che alcun test possa accorgersene.
+panic = "unwind"

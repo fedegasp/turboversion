@@ -6,7 +6,7 @@
 //
 
 //! Barra di stato: disegna le scorciatoie attive, scelte da
-//! `ui::view_model::hints` in base all'overlay in cima e al pannello a
+//! `ui::hints::active` in base all'overlay in cima e al pannello a
 //! fuoco.
 
 use ratatui::{
@@ -16,8 +16,8 @@ use ratatui::{
     Frame,
 };
 
+use crate::ui::hints::Hints;
 use crate::ui::theme;
-use crate::ui::view_model::Hints;
 
 pub(crate) fn render_statusbar(f: &mut Frame, area: Rect, keys: Hints) {
     let mut spans = Vec::new();
@@ -34,7 +34,8 @@ pub(crate) fn render_statusbar(f: &mut Frame, area: Rect, keys: Hints) {
 
 #[cfg(test)]
 mod tests {
-    use crate::app::{model_for_tests, MenuState, Overlay, Panel};
+    use crate::app::{model_for_tests, update, MenuState, Overlay, Panel};
+    use crate::msg::Msg;
 
     #[test]
     fn statusbar_hints_change_when_menu_opens() {
@@ -58,5 +59,17 @@ mod tests {
 
         model.focus = Panel::Changes;
         assert!(crate::ui::render(80, 24, &mut model).contains("Stage"));
+    }
+
+    #[test]
+    fn git_unavailable_is_still_said_after_the_dialog_is_dismissed() {
+        let mut model = model_for_tests();
+        assert!(!crate::ui::render(80, 24, &mut model).contains("Git unavailable"));
+
+        update(&mut model, Msg::WorkerLost);
+        // Il dialog d'annuncio si chiude; la barra di stato è ciò che
+        // resta a dire che le operazioni git non si fanno più.
+        model.overlays.pop();
+        assert!(crate::ui::render(80, 24, &mut model).contains("Git unavailable"));
     }
 }

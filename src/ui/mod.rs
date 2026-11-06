@@ -9,10 +9,10 @@
 //! verso `ui::panels`. Legge il `Model` e disegna soltanto — non chiama mai
 //! nulla in `git/`.
 
+pub(crate) mod hints;
 pub(crate) mod panels;
 pub(crate) mod text;
 pub(crate) mod theme;
-pub(crate) mod view_model;
 pub(crate) mod widgets;
 
 use ratatui::{
@@ -22,8 +22,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{Model, Panel};
-use view_model::Rows;
+use crate::app::{Model, Panel, PanelContent};
 use widgets::window::Window;
 
 /// Sotto questa larghezza si mostra un solo pannello (quello con il focus).
@@ -66,7 +65,7 @@ pub(crate) fn view(f: &mut Frame, model: &mut Model, diff_viewport: &mut u16) {
     }
 
     panels::menubar::render_menubar(f, menu_area, model.menu());
-    panels::statusbar::render_statusbar(f, status_area, view_model::hints(model));
+    panels::statusbar::render_statusbar(f, status_area, hints::active(model));
     if let Some(m) = model.menu() {
         panels::menubar::render_dropdown(f, menu_area, m);
     }
@@ -89,6 +88,13 @@ fn draw_too_small(f: &mut Frame, area: Rect) {
     );
 }
 
+/// Le aree dei pannelli. Dipendono dall'area totale e dal pannello a
+/// fuoco, e non devono dipendere da altro: l'altezza del pannello Diff che
+/// ne esce rientra nel `Model` come `Msg::DiffViewport`, e quel `Msg`
+/// cambia `diff_scroll`. Se la misura dipendesse a sua volta da
+/// `diff_scroll` (o da qualunque altra cosa che quel `Msg` tocca), ogni
+/// frame ne chiederebbe un altro e il ciclo principale non tornerebbe mai
+/// a riposo.
 fn layout_panels(body: Rect, focus: Panel, term_width: u16) -> Vec<(Panel, Rect)> {
     if term_width < NARROW {
         return vec![(focus, body)];
@@ -118,13 +124,28 @@ fn draw_panel(f: &mut Frame, model: &mut Model, panel: Panel, area: Rect) {
     let inner = Window::inner(area);
     let sel = theme::selection(focused);
 
-    // Quali dati finiscano in ciascun pannello lo decide `view_model`:
-    // qui si sceglie solo con quale resa disegnarli.
-    match view_model::rows(model, panel) {
-        Rows::Branches(items, state) => panels::branches::render(f, items, inner, sel, state),
-        Rows::History(items, state) => panels::history::render(f, items, inner, sel, state),
-        Rows::Files(items, state) => panels::changes::render(f, items, inner, sel, state),
-        Rows::Diff(lines, scroll) => panels::diff::render(f, lines, inner, scroll),
+    // Quale lista finisca in quale pannello lo dice `Model::content_mut`,
+    // che è l'unica tabella pannello -> dati: qui si sceglie solo con
+    // quale resa disegnarla. I `ListPanel` arrivano interi, ma da `ui` di
+    // essi si può solo leggere e prestare il `ListState` (`parts_mut`):
+    // i metodi che cambiano lista e selezione non sono raggiungibili da
+    // qui.
+    match model.content_mut(panel) {
+        PanelContent::Branches(list) => {
+            let (items, state) = list.parts_mut();
+            panels::branches::render(f, items, inner, sel, state);
+        }
+        PanelContent::History(list) => {
+            let (items, state) = list.parts_mut();
+            panels::history::render(f, items, inner, sel, state);
+        }
+        PanelContent::Files(list) => {
+            let (items, state) = list.parts_mut();
+            panels::changes::render(f, items, inner, sel, state);
+        }
+        // Il limite dello scorrimento (`viewport`) serve solo a `update`:
+        // al renderer basta sapere da quale riga partire.
+        PanelContent::Diff { lines, scroll, .. } => panels::diff::render(f, lines, inner, *scroll),
     }
 }
 
@@ -178,6 +199,56 @@ mod tests {
         let out = render(80, 24, &mut model_for_tests());
         println!("{out}");
         assert!(out.contains("History"));
+    }
+
+    /// Lo stato che il `Model` tiene, nella forma che un frame potrebbe
+    /// alterare: righe delle liste, cursori, scorrimento del diff, focus e
+    /// overlay aperti.
+    fn model_snapshot(model: &Model) -> Vec<usize> {
+        let lists = [
+            (
+                model.local_branches.len(),
+                model.local_branches.selected_index(),
+            ),
+            (
+                model.remote_branches.len(),
+                model.remote_branches.selected_index(),
+            ),
+            (model.history().len(), model.history().selected_index()),
+            (model.files.len(), model.files.selected_index()),
+        ];
+        let mut out: Vec<usize> = lists
+            .iter()
+            .flat_map(|(len, sel)| [*len, sel.unwrap_or(usize::MAX)])
+            .collect();
+        out.push(usize::from(model.diff_scroll));
+        out.push(model.diff.len());
+        out.push(model.focus as usize);
+        out.push(model.overlays.len());
+        out
+    }
+
+    /// Disegnare non cambia il `Model`. Il compilatore già lo impone per le
+    /// liste — da `ui` un `ListPanel` si legge, e del suo `ListState` si
+    /// presta solo quanto serve a ratatui per ricordare l'offset — e questo
+    /// test guarda lo stesso dalla parte del comportamento: due frame di
+    /// fila lasciano righe, cursori e scorrimento dove stavano.
+    #[test]
+    fn drawing_a_frame_leaves_the_model_as_it_was() {
+        let mut model = model_for_tests();
+        model.focus = Panel::Changes;
+        model.local_branches.select(1);
+        model.files.select(1);
+        model.diff_scroll = 1;
+
+        // Il primo frame assesta l'altezza del pannello Diff (che rientra
+        // come `Msg`, non scritta da chi disegna) e con essa il limite
+        // dello scorrimento: da qui in poi non c'è più nulla da assestare.
+        render(100, 30, &mut model);
+        let before = model_snapshot(&model);
+
+        render(100, 30, &mut model);
+        assert_eq!(model_snapshot(&model), before);
     }
 
     #[test]
