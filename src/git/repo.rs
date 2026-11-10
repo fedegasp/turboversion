@@ -14,7 +14,7 @@
 
 use std::fmt;
 
-use super::domain::{Branch, Commit, FileEntry};
+use super::domain::{Branch, Commit, CommitId, FileEntry};
 
 /// Errore di un'operazione `Repo`, con un messaggio già pronto per essere
 /// mostrato in un dialog. Oggi un messaggio di testo semplice basta a
@@ -34,7 +34,17 @@ impl fmt::Display for GitError {
 pub(crate) trait Repo {
     fn branches(&self) -> Vec<Branch>;
     fn commits(&self) -> Vec<Commit>;
+    /// I file della working copy con modifiche non committate.
     fn files(&self) -> Vec<FileEntry>;
+    /// I file toccati dal commit `id`: il confronto con il suo primo
+    /// parent, o con l'albero vuoto per un commit senza parent. Per un
+    /// merge è quindi ciò che il merge ha portato nel ramo su cui è stato
+    /// fatto. `staged` è sempre falso: in un commit non c'è un indice.
+    ///
+    /// A differenza delle altre letture restituisce un errore invece di
+    /// una lista vuota: chi chiede un commit preciso deve poter distinguere
+    /// "nessun file" da "commit illeggibile".
+    fn files_of_commit(&self, id: &CommitId) -> Result<Vec<FileEntry>, GitError>;
     fn diff(&self) -> Vec<String>;
     fn create_branch(&mut self, name: &str) -> Result<Branch, GitError>;
     fn delete_branch(&mut self, name: &str) -> Result<(), GitError>;

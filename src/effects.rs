@@ -31,6 +31,10 @@ pub(crate) fn run(cmd: Cmd, repo: &mut dyn Repo) -> Msg {
             files: repo.files(),
             diff: repo.diff(),
         },
+        Cmd::LoadCommitFiles(id) => {
+            let result = repo.files_of_commit(&id);
+            Msg::CommitFilesLoaded { id, result }
+        }
         Cmd::CreateBranch(name) => {
             let result = repo.create_branch(&name);
             Msg::BranchCreated { name, result }
@@ -64,6 +68,27 @@ mod tests {
         assert_eq!(commits.len(), repo.commits().len());
         assert_eq!(files.len(), repo.files().len());
         assert_eq!(diff.len(), repo.diff().len());
+    }
+
+    #[test]
+    fn load_commit_files_carries_the_requested_id_on_both_outcomes() {
+        let mut repo = MockGitRepo::new();
+        let known = repo.commits()[1].id.clone();
+
+        let msg = run(Cmd::LoadCommitFiles(known.clone()), &mut repo);
+        let Msg::CommitFilesLoaded { id, result } = msg else {
+            panic!("expected Msg::CommitFilesLoaded");
+        };
+        assert_eq!(id, known);
+        assert_eq!(result.map(|f| f.len()).ok(), Some(2));
+
+        let unknown = crate::git::domain::CommitId("nope".to_string());
+        let msg = run(Cmd::LoadCommitFiles(unknown.clone()), &mut repo);
+        let Msg::CommitFilesLoaded { id, result } = msg else {
+            panic!("expected Msg::CommitFilesLoaded");
+        };
+        assert_eq!(id, unknown);
+        assert!(result.is_err());
     }
 
     #[test]

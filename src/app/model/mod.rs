@@ -8,7 +8,11 @@
 use super::list_panel::ListPanel;
 use super::panel::Panel;
 use crate::dialog::Dialog;
-use crate::git::domain::{Branch, Commit, FileEntry};
+use crate::git::domain::{Branch, Commit, CommitId, FileEntry};
+
+mod changes;
+
+pub(crate) use changes::{ChangesView, CommitChanges, CommitLoad};
 
 #[derive(Clone, Copy)]
 pub(crate) struct MenuState {
@@ -47,6 +51,19 @@ pub(crate) enum HistoryEntry {
     Commit(Commit),
 }
 
+impl HistoryEntry {
+    /// Se `self` e `other` sono la stessa riga, cioè la working copy
+    /// entrambe o lo stesso commit, a prescindere dalla posizione: è ciò
+    /// con cui la selezione sopravvive a una rilettura del log.
+    fn is_same_row(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::WorkingCopy, Self::WorkingCopy) => true,
+            (Self::Commit(a), Self::Commit(b)) => a.id == b.id,
+            (Self::WorkingCopy, Self::Commit(_)) | (Self::Commit(_), Self::WorkingCopy) => false,
+        }
+    }
+}
+
 /// Il contenuto di un pannello: la lista che mostra, insieme al cursore
 /// che la percorre, oppure le righe del diff con il suo scorrimento.
 ///
@@ -59,7 +76,15 @@ pub(crate) enum HistoryEntry {
 pub(crate) enum PanelContent<'a> {
     Branches(&'a mut ListPanel<Branch>),
     History(&'a mut ListPanel<HistoryEntry>),
-    Files(&'a mut ListPanel<FileEntry>),
+    /// I file della working copy: gli unici che si possono mettere o
+    /// togliere dallo stage.
+    WorkingCopyFiles(&'a mut ListPanel<FileEntry>),
+    /// I file toccati dal commit selezionato in History: si guardano e
+    /// basta. Una lista vuota è un commit che non tocca alcun file.
+    CommitFiles(&'a mut ListPanel<FileEntry>),
+    /// Il pannello Changes è su un commit di cui non ci sono (ancora, o
+    /// più) file da elencare: al posto della lista si mostra perché.
+    ChangesNotice(ChangesNotice<'a>),
     /// Il pannello Diff non è una lista con selezione: scorre per righe.
     /// `viewport` è l'altezza con cui il pannello è stato disegnato
     /// l'ultima volta, e serve solo a fermare lo scorrimento quando
@@ -72,6 +97,17 @@ pub(crate) enum PanelContent<'a> {
     },
 }
 
+/// Perché il pannello Changes, su un commit, non ha una lista da mostrare.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChangesNotice<'a> {
+    /// I file sono stati chiesti e non sono ancora arrivati.
+    Loading,
+    /// La lettura è fallita; il messaggio è quello del backend.
+    Failed(&'a str),
+    /// Le operazioni git non sono più possibili: i file non arriveranno.
+    GitUnavailable,
+}
+
 impl PanelContent<'_> {
     /// Muove di `delta` righe ciò che il pannello mostra: il cursore della
     /// lista, o lo scorrimento del diff.
@@ -79,7 +115,9 @@ impl PanelContent<'_> {
         match self {
             Self::Branches(list) => list.step(delta),
             Self::History(list) => list.step(delta),
-            Self::Files(list) => list.step(delta),
+            Self::WorkingCopyFiles(list) | Self::CommitFiles(list) => list.step(delta),
+            // Nessuna riga da percorrere.
+            Self::ChangesNotice(_) => {}
             Self::Diff {
                 lines,
                 scroll,
@@ -127,14 +165,26 @@ pub(crate) struct Model {
     commits: Vec<Commit>,
     /// Se la working copy ha modifiche non committate. Deciso leggendo il
     /// repository, **non** guardando il pannello Changes: quel pannello
-    /// mostra i file della working copy oggi, ma è destinato a mostrare
-    /// anche quelli di un commit selezionato, e la riga in cima a History
-    /// non deve dipendere da cosa si sta guardando.
+    /// mostra anche i file del commit selezionato, e la riga in cima a
+    /// History non deve dipendere da cosa si sta guardando.
     working_copy_dirty: bool,
     /// Le righe del pannello History: i commit, preceduti dallo stato non
     /// committato quando c'è.
     history: ListPanel<HistoryEntry>,
-    pub(crate) files: ListPanel<FileEntry>,
+    /// I file della working copy, come `Repo::files` li ha letti. Restano
+    /// qui anche quando Changes mostra un commit: tornando sulla working
+    /// copy si ritrovano così com'erano, cursore compreso.
+    pub(crate) working_copy_files: ListPanel<FileEntry>,
+    /// Che cosa mostra il pannello Changes. Segue la selezione di History
+    /// e si cambia solo da `sync_changes_with_history`,
+    /// `receive_commit_files` e `lose_git`.
+    changes: ChangesView,
+    /// L'ultima vista di un commit con i file già arrivati, lasciata quando
+    /// la selezione è passata altrove. Tornarci la ritrova senza
+    /// rileggerla: un commit non cambia. È una sola, non una cache: basta
+    /// per l'andirivieni fra due righe vicine, e dopo la perdita del worker
+    /// è ciò che resta leggibile oltre alla vista corrente.
+    last_commit: Option<CommitChanges>,
     pub(crate) diff: Vec<String>,
     pub(crate) diff_scroll: u16,
     /// Righe visibili nel pannello Diff nell'ultimo frame disegnato: il
@@ -166,7 +216,9 @@ impl Model {
             commits: Vec::new(),
             working_copy_dirty: false,
             history: ListPanel::empty(),
-            files: ListPanel::empty(),
+            working_copy_files: ListPanel::empty(),
+            changes: ChangesView::WorkingCopy,
+            last_commit: None,
             diff: Vec::new(),
             diff_scroll: 0,
             diff_viewport: 0,
@@ -186,9 +238,16 @@ impl Model {
     /// Restituisce `true` solo la prima volta: le chiamate successive non
     /// cambiano nulla, così chi chiama può annunciare la perdita una
     /// volta sola senza tenere conti propri.
+    ///
+    /// Chiude anche l'eventuale attesa dei file di un commit: il `Cmd` che
+    /// li stava leggendo non avrà mai un esito, e il pannello deve dirlo
+    /// invece di restare in attesa per sempre.
     pub(super) fn lose_git(&mut self) -> bool {
         let first = self.git_available;
         self.git_available = false;
+        if let ChangesView::Commit(shown) = &mut self.changes {
+            shown.give_up_waiting();
+        }
         first
     }
 
@@ -215,7 +274,21 @@ impl Model {
             Panel::Branches => PanelContent::Branches(&mut self.local_branches),
             Panel::Remotes => PanelContent::Branches(&mut self.remote_branches),
             Panel::History => PanelContent::History(&mut self.history),
-            Panel::Changes => PanelContent::Files(&mut self.files),
+            Panel::Changes => match &mut self.changes {
+                ChangesView::WorkingCopy => {
+                    PanelContent::WorkingCopyFiles(&mut self.working_copy_files)
+                }
+                ChangesView::Commit(commit) => match commit.load_mut() {
+                    CommitLoad::Loaded(files) => PanelContent::CommitFiles(files),
+                    CommitLoad::Awaiting => PanelContent::ChangesNotice(ChangesNotice::Loading),
+                    CommitLoad::Failed(message) => {
+                        PanelContent::ChangesNotice(ChangesNotice::Failed(message))
+                    }
+                    CommitLoad::Unavailable => {
+                        PanelContent::ChangesNotice(ChangesNotice::GitUnavailable)
+                    }
+                },
+            },
             Panel::Diff => PanelContent::Diff {
                 lines: &self.diff,
                 scroll: &mut self.diff_scroll,
@@ -263,8 +336,13 @@ impl Model {
     /// copy ha modifiche. Senza modifiche quella riga non esiste affatto,
     /// invece di comparire vuota.
     ///
-    /// Come per ogni lista sostituita, il cursore torna in cima: le righe
-    /// sono nuove e la precedente poteva non esserci più.
+    /// La selezione segue la riga, non l'indice: se la riga selezionata
+    /// prima c'è ancora (la working copy, o lo stesso commit) il cursore la
+    /// ritrova anche se si è spostata. Se non c'è più il cursore resta alla
+    /// stessa altezza, limitato alla lista nuova: la riga della working copy
+    /// che sparisce, perché è tornata pulita, lascia così il posto al commit
+    /// più recente, e un commit riscritto (un amend) a quello che l'ha
+    /// sostituito. Su una History che era vuota si parte dalla cima.
     fn rebuild_history(&mut self) {
         let mut entries = Vec::with_capacity(self.commits.len() + 1);
         if self.working_copy_dirty {
@@ -274,7 +352,91 @@ impl Model {
         // stato letto, `history` è la lista derivata. Il backend reale ne
         // carica al più qualche centinaio, non l'intero repository.
         entries.extend(self.commits.iter().cloned().map(HistoryEntry::Commit));
-        self.history.set(entries);
+
+        let old = std::mem::replace(&mut self.history, ListPanel::new(entries));
+        let (Some(index), Some(anchor)) = (old.selected_index(), old.selected()) else {
+            return;
+        };
+        if !self.history.select_first(|e| e.is_same_row(anchor)) {
+            self.history.select_nearest(index);
+        }
+    }
+
+    /// Che cosa mostra il pannello Changes.
+    pub(crate) fn changes(&self) -> &ChangesView {
+        &self.changes
+    }
+
+    /// Allinea il pannello Changes alla riga selezionata in History, e
+    /// restituisce il commit di cui servono i file, se ce n'è uno da
+    /// chiedere. Va chiamata dopo ogni cambiamento della selezione di
+    /// History (un tasto, una rilettura del log).
+    ///
+    /// Se Changes mostra già quella riga non cambia nulla e non chiede
+    /// nulla: rileggere il log senza che la selezione si sposti lascia i
+    /// file e il loro cursore dove stavano. Nemmeno tornare sull'ultimo
+    /// commit lasciato con i file già arrivati chiede nulla: la sua vista
+    /// viene ripresa così com'era. Una History vuota mostra la working
+    /// copy, che in quel caso è vuota anche lei.
+    ///
+    /// Senza git un commit mai letto non viene chiesto: la vista nasce già
+    /// "non disponibile", invece di aspettare un esito che non arriverà.
+    ///
+    /// Non tocca History: è ciò che impedisce il ciclo selezione ->
+    /// ricarico -> cursore in cima -> nuova selezione.
+    pub(super) fn sync_changes_with_history(&mut self) -> Option<CommitId> {
+        let wanted = match self.history.selected() {
+            None | Some(HistoryEntry::WorkingCopy) => None,
+            Some(HistoryEntry::Commit(c)) => Some(c.id.clone()),
+        };
+        let (next, ask) = match (wanted, &self.changes) {
+            (None, ChangesView::WorkingCopy) => return None,
+            (Some(id), ChangesView::Commit(shown)) if *shown.id() == id => return None,
+            (None, ChangesView::Commit(_)) => (ChangesView::WorkingCopy, None),
+            (Some(id), ChangesView::WorkingCopy | ChangesView::Commit(_)) => {
+                match self.take_kept(&id) {
+                    Some(kept) => (ChangesView::Commit(kept), None),
+                    None if !self.git_available => {
+                        (ChangesView::Commit(CommitChanges::unavailable(id)), None)
+                    }
+                    None => (
+                        ChangesView::Commit(CommitChanges::requested(id.clone())),
+                        Some(id),
+                    ),
+                }
+            }
+        };
+        if let ChangesView::Commit(left) = std::mem::replace(&mut self.changes, next) {
+            if left.is_loaded() {
+                self.last_commit = Some(left);
+            }
+        }
+        ask
+    }
+
+    /// Riprende la vista conservata in `last_commit`, se è quella del commit
+    /// `id`; altrimenti la lascia dov'è.
+    fn take_kept(&mut self, id: &CommitId) -> Option<CommitChanges> {
+        if self.last_commit.as_ref().is_some_and(|k| k.id() == id) {
+            self.last_commit.take()
+        } else {
+            None
+        }
+    }
+
+    /// Consegna a Changes l'esito della lettura dei file del commit `id`, e
+    /// dice se era atteso. Un esito che non lo è (la selezione è passata
+    /// altrove prima che arrivasse, o è un doppione) viene scartato senza
+    /// toccare nulla, errore compreso.
+    pub(super) fn receive_commit_files(
+        &mut self,
+        id: &CommitId,
+        result: Result<Vec<FileEntry>, String>,
+    ) -> bool {
+        match &mut self.changes {
+            ChangesView::Commit(shown) => shown.receive(id, result),
+            ChangesView::WorkingCopy => false,
+        }
     }
 
     /// Le righe di History, per i test che le ispezionano da fuori: la

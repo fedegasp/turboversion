@@ -20,7 +20,7 @@ fn space_on_an_empty_changes_list_does_not_panic() {
         },
     );
     assert_eq!(
-        app.files.selected_index(),
+        app.working_copy_files.selected_index(),
         None,
         "lista vuota, nessuna riga"
     );
@@ -30,7 +30,7 @@ fn space_on_an_empty_changes_list_does_not_panic() {
     press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Char(' '));
 
-    assert!(app.files.is_empty());
+    assert!(app.working_copy_files.is_empty());
 }
 
 #[test]
@@ -53,10 +53,10 @@ fn only_the_focused_panel_moves() {
     press(&mut app, KeyCode::Down);
     assert_eq!(app.diff_scroll, 1);
     assert_eq!(app.history().selected_index(), Some(0));
-    assert_eq!(app.files.selected_index(), Some(0));
+    assert_eq!(app.working_copy_files.selected_index(), Some(0));
 
     app.focus = Panel::Changes;
     press(&mut app, KeyCode::Down);
-    assert_eq!(app.files.selected_index(), Some(1));
+    assert_eq!(app.working_copy_files.selected_index(), Some(1));
     assert_eq!(app.history().selected_index(), Some(0));
 }

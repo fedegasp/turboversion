@@ -9,22 +9,24 @@
 //! tema; qui vive solo l'infrastruttura comune (`TestApp` e i suoi
 //! helper).
 
+use super::test_support::run_to_completion;
 use super::*;
-use crate::effects;
 use crate::git::mock::MockGitRepo;
 use crate::input;
-use crate::msg::Msg;
+use crate::msg::{Cmd, Msg};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::ops::{Deref, DerefMut};
 
 mod branches;
+mod changes;
 mod diff;
 mod overlays;
 mod panels;
 mod worker_loss;
 
 /// Replica il ciclo di `run` (traduzione del tasto, `update`, eventuali
-/// effetti contro un `MockGitRepo`) per i test, esponendo il `Model`
+/// effetti contro un `MockGitRepo`, e gli effetti che i loro esiti chiedono
+/// a loro volta) per i test, esponendo il `Model`
 /// tramite `Deref`/`DerefMut`: un wrapper di comodo solo per i test, non
 /// un tipo pubblico dell'app.
 ///
@@ -37,27 +39,27 @@ mod worker_loss;
 /// logica di smistamento (che vive comunque solo in `update`).
 pub(super) struct TestApp {
     pub(super) model: Model,
-    repo: MockGitRepo,
+    pub(super) repo: MockGitRepo,
 }
 
 impl TestApp {
     pub(super) fn new() -> Self {
         let mut model = Model::new();
         let mut repo = MockGitRepo::new();
-        for cmd in init_cmds() {
-            let msg = effects::run(cmd, &mut repo);
-            update(&mut model, msg);
-        }
+        run_to_completion(&mut model, &mut repo, init_cmds());
         Self { model, repo }
     }
 
-    fn send(&mut self, msg: Msg) {
-        for cmd in update(&mut self.model, msg) {
-            let result = effects::run(cmd, &mut self.repo);
-            // Un Cmd produce un solo Msg di esito, mai altri Cmd: nessun
-            // rischio di ricorsione.
-            update(&mut self.model, result);
-        }
+    pub(super) fn send(&mut self, msg: Msg) {
+        let cmds = update(&mut self.model, msg);
+        self.run(cmds);
+    }
+
+    /// Esegue `cmds` e tutto ciò che i loro esiti chiedono. Serve ai test
+    /// che trattengono i `Cmd` di `update` per consegnarli più tardi, o in
+    /// un altro ordine.
+    pub(super) fn run(&mut self, cmds: Vec<Cmd>) {
+        run_to_completion(&mut self.model, &mut self.repo, cmds);
     }
 }
 

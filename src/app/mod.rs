@@ -31,7 +31,7 @@ pub(crate) use menu::MenuAction;
 pub(crate) use menu::MENUS;
 #[cfg(test)]
 pub(crate) use model::Overlay;
-pub(crate) use model::{HistoryEntry, MenuState, Model, PanelContent};
+pub(crate) use model::{ChangesNotice, HistoryEntry, MenuState, Model, PanelContent};
 pub(crate) use panel::Panel;
 pub(crate) use run::run;
 #[cfg(test)]

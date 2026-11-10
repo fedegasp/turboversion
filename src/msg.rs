@@ -10,7 +10,7 @@
 //! produce `Cmd`) ed `effects` (esegue `Cmd` contro `Repo`, produce il
 //! `Msg` di esito).
 
-use crate::git::domain::{Branch, Commit, FileEntry};
+use crate::git::domain::{Branch, Commit, CommitId, FileEntry};
 use crate::git::repo::GitError;
 
 /// Evento verso `update`. Le varianti "di tasto" (`Esc`, `Enter`, ...) sono
@@ -65,6 +65,14 @@ pub(crate) enum Msg {
         files: Vec<FileEntry>,
         diff: Vec<String>,
     },
+    /// Esito di `Cmd::LoadCommitFiles`. `id` è il commit chiesto, e serve
+    /// a riconoscere un esito arrivato tardi: se nel frattempo la selezione
+    /// di History è passata altrove, questi file non sono più quelli da
+    /// mostrare.
+    CommitFilesLoaded {
+        id: CommitId,
+        result: Result<Vec<FileEntry>, GitError>,
+    },
     /// Esito di `Cmd::CreateBranch`; `name` è il nome digitato (già
     /// normalizzato), utile per ripopolare il dialog in caso di errore.
     BranchCreated {
@@ -84,6 +92,9 @@ pub(crate) enum Msg {
 pub(crate) enum Cmd {
     /// Carica branch/commit/file/diff iniziali.
     LoadAll,
+    /// Legge i file toccati da un commit, per il pannello Changes. Lo
+    /// chiede `update` quando la selezione di History arriva su un commit.
+    LoadCommitFiles(CommitId),
     CreateBranch(String),
     DeleteBranch(String),
 }

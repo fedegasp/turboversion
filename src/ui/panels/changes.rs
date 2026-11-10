@@ -5,16 +5,24 @@
 // 2026-11-03 Federico Gasperini
 //
 
-//! Pannello "Changes": file nel working tree, con checkbox di staging.
+//! Pannello "Changes": i file della working copy, con la checkbox dello
+//! stage, oppure i file toccati dal commit selezionato in History, senza
+//! checkbox perché un commit non ha un indice. Quale delle due liste
+//! arrivi lo decide il `Model`; qui si sceglie solo come appaiono. Quando
+//! un commit non ha una lista da elencare (file in arrivo, lettura
+//! fallita, git non più disponibile, commit vuoto) il pannello lo dice con
+//! una riga di testo al posto della lista: un pannello vuoto non
+//! distinguerebbe questi casi.
 
 use ratatui::{
     layout::Rect,
     style::Style,
     text::{Line, Span},
-    widgets::{ListItem, ListState},
+    widgets::{ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 
+use crate::app::ChangesNotice;
 use crate::git::domain::{FileEntry, FileStatus};
 use crate::ui::text::fit;
 use crate::ui::theme;
@@ -22,7 +30,8 @@ use crate::ui::theme;
 const MARK_W: usize = 4;
 const STATUS_W: usize = 2;
 
-pub(crate) fn render(
+/// I file della working copy: ognuno con la sua checkbox di stage.
+pub(crate) fn render_working_copy(
     f: &mut Frame,
     files: &[FileEntry],
     area: Rect,
@@ -34,17 +43,71 @@ pub(crate) fn render(
         .iter()
         .map(|e| {
             let mark = if e.staged { "[x]" } else { "[ ]" };
-            let color = match e.status {
-                FileStatus::Added => theme::ADDED,
-                FileStatus::Deleted => theme::REMOVED,
-                FileStatus::Modified | FileStatus::Untracked => theme::HASH,
-            };
-            ListItem::new(Line::from(vec![
-                Span::raw(format!("{mark} ")),
-                Span::styled(format!("{} ", e.status.label()), color),
-                Span::raw(fit(&e.path, path_w)),
-            ]))
+            let mut spans = vec![Span::raw(format!("{mark} "))];
+            spans.extend(status_and_path(e, path_w));
+            ListItem::new(Line::from(spans))
         })
         .collect();
     super::render_list(f, items, area, selection, state);
+}
+
+/// I file di un commit: senza checkbox, che lì direbbe "non in stage" di
+/// un file per cui lo stage non esiste. Il percorso prende la larghezza
+/// liberata.
+pub(crate) fn render_commit(
+    f: &mut Frame,
+    files: &[FileEntry],
+    area: Rect,
+    selection: Style,
+    state: &mut ListState,
+) {
+    if files.is_empty() {
+        // Un commit può non toccare alcun file (`--allow-empty`).
+        render_text(f, NO_FILES, area);
+        return;
+    }
+    let path_w = (area.width as usize).saturating_sub(STATUS_W);
+    let items: Vec<ListItem> = files
+        .iter()
+        .map(|e| ListItem::new(Line::from(status_and_path(e, path_w).to_vec())))
+        .collect();
+    super::render_list(f, items, area, selection, state);
+}
+
+const NO_FILES: &str = "No files changed";
+
+/// Perché, su un commit, non c'è una lista da mostrare. I tre punti sono
+/// ASCII, come nel resto della UI ("New branch..."): l'ellissi Unicode è
+/// "East Asian ambiguous" e su alcuni terminali occupa due celle.
+pub(crate) fn render_notice(f: &mut Frame, notice: ChangesNotice<'_>, area: Rect) {
+    let text = match notice {
+        ChangesNotice::Loading => "Loading...",
+        ChangesNotice::Failed(message) => message,
+        ChangesNotice::GitUnavailable => "Git unavailable: files not loaded",
+    };
+    render_text(f, text, area);
+}
+
+/// Una riga di testo al posto della lista, con lo stile delle finestre. Va
+/// a capo: un messaggio d'errore del backend può essere più largo del
+/// pannello, e troncato non si leggerebbe.
+fn render_text(f: &mut Frame, text: &str, area: Rect) {
+    f.render_widget(
+        Paragraph::new(text)
+            .style(theme::window().fg(theme::DIM))
+            .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
+fn status_and_path(e: &FileEntry, path_w: usize) -> [Span<'static>; 2] {
+    let color = match e.status {
+        FileStatus::Added => theme::ADDED,
+        FileStatus::Deleted => theme::REMOVED,
+        FileStatus::Modified | FileStatus::Untracked => theme::HASH,
+    };
+    [
+        Span::styled(format!("{} ", e.status.label()), color),
+        Span::raw(fit(&e.path, path_w)),
+    ]
 }

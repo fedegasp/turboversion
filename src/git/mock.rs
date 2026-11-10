@@ -16,7 +16,7 @@
 //! case-insensitive, o un ramo `a/b` quando esiste già `a`. Sul backend
 //! reale sono errori, qui no.
 
-use super::domain::{Branch, BranchKind, Commit, FileEntry, FileStatus};
+use super::domain::{Branch, BranchKind, Commit, CommitId, FileEntry, FileStatus};
 use super::repo::{GitError, Repo};
 use super::validate::{branch_not_found, current_branch_not_deletable, validate_branch_name};
 
@@ -49,6 +49,9 @@ fn initial_commits() -> Vec<Commit> {
     ]
     .into_iter()
     .map(|(graph, hash, msg, author)| Commit {
+        // In memoria l'hash abbreviato basta come identità: è univoco fra
+        // questi pochi commit.
+        id: CommitId(hash.to_string()),
         graph: graph.to_string(),
         hash: hash.to_string(),
         msg: msg.to_string(),
@@ -72,6 +75,52 @@ fn initial_files() -> Vec<FileEntry> {
         staged,
     })
     .collect()
+}
+
+/// I file toccati da ciascun commit di `initial_commits`, rispetto al suo
+/// primo parent. Insiemi diversi fra loro e diversi dalla working copy, così
+/// un test vede subito quale lista sta mostrando il pannello Changes.
+fn initial_commit_files() -> Vec<(CommitId, Vec<FileEntry>)> {
+    let table: [(&str, &[(&str, FileStatus)]); 6] = [
+        ("a1b2c3d", &[("src/ui/menubar.rs", FileStatus::Added)]),
+        (
+            "d4e5f6a",
+            &[
+                ("src/ui/menubar.rs", FileStatus::Modified),
+                ("src/ui/dropdown.rs", FileStatus::Added),
+            ],
+        ),
+        ("9f8e7d6", &[("src/ui/menubar.rs", FileStatus::Added)]),
+        ("c0ffee1", &[("src/ui/statusbar.rs", FileStatus::Modified)]),
+        (
+            "b4dc0de",
+            &[
+                ("src/ui/window.rs", FileStatus::Modified),
+                ("src/ui/old_window.rs", FileStatus::Deleted),
+            ],
+        ),
+        (
+            "1234abc",
+            &[
+                ("src/theme.rs", FileStatus::Added),
+                ("Cargo.toml", FileStatus::Added),
+            ],
+        ),
+    ];
+    table
+        .into_iter()
+        .map(|(hash, files)| {
+            let files = files
+                .iter()
+                .map(|&(path, status)| FileEntry {
+                    path: path.to_string(),
+                    status,
+                    staged: false,
+                })
+                .collect();
+            (CommitId(hash.to_string()), files)
+        })
+        .collect()
 }
 
 fn initial_diff() -> Vec<String> {
@@ -103,6 +152,7 @@ fn initial_diff() -> Vec<String> {
 pub(crate) struct MockGitRepo {
     branches: Vec<Branch>,
     commits: Vec<Commit>,
+    commit_files: Vec<(CommitId, Vec<FileEntry>)>,
     files: Vec<FileEntry>,
     diff: Vec<String>,
 }
@@ -112,6 +162,7 @@ impl MockGitRepo {
         Self {
             branches: initial_branches(),
             commits: initial_commits(),
+            commit_files: initial_commit_files(),
             files: initial_files(),
             diff: initial_diff(),
         }
@@ -135,6 +186,19 @@ impl Repo for MockGitRepo {
 
     fn files(&self) -> Vec<FileEntry> {
         self.files.clone()
+    }
+
+    fn files_of_commit(&self, id: &CommitId) -> Result<Vec<FileEntry>, GitError> {
+        self.commit_files
+            .iter()
+            .find(|(c, _)| c == id)
+            .map(|(_, files)| files.clone())
+            .ok_or_else(|| {
+                GitError(format!(
+                    "Cannot read the files of commit {}: not found",
+                    id.as_str()
+                ))
+            })
     }
 
     fn diff(&self) -> Vec<String> {
@@ -177,6 +241,19 @@ impl Repo for MockGitRepo {
 mod tests {
     use super::*;
     use crate::git::validate::{branch_already_exists, branch_path_conflict};
+
+    #[test]
+    fn every_commit_has_its_own_files_and_an_unknown_one_is_an_error() {
+        let repo = MockGitRepo::new();
+        for c in repo.commits() {
+            let files = repo.files_of_commit(&c.id).expect("commit noto");
+            assert!(!files.is_empty(), "{} senza file", c.hash);
+            assert!(files.iter().all(|f| !f.staged));
+        }
+        assert!(repo
+            .files_of_commit(&CommitId("does-not-exist".to_string()))
+            .is_err());
+    }
 
     #[test]
     fn create_branch_adds_a_local_branch_and_returns_it() {

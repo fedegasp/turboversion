@@ -55,14 +55,16 @@ const MENU_KEYS: &[(&str, &str)] = &[
 const GIT_UNAVAILABLE: (&str, &str) = ("!", "Git unavailable");
 
 /// Scorciatoie del pannello principale; `Space Stage` compare solo quando
-/// il focus è sul pannello Changes, dove quel tasto ha davvero effetto.
+/// il focus è sul pannello Changes e questo mostra la working copy, l'unico
+/// caso in cui quel tasto ha effetto: sui file di un commit non c'è niente
+/// da mettere in stage.
 fn main_hints(model: &Model) -> Vec<(&'static str, &'static str)> {
     let mut hints = Vec::new();
     if !model.git_available() {
         hints.push(GIT_UNAVAILABLE);
     }
     hints.extend([("Tab", "Panel"), ("↑↓", "Move")]);
-    if model.focus == Panel::Changes {
+    if model.focus == Panel::Changes && model.changes().is_working_copy() {
         hints.push(("Space", "Stage"));
     }
     hints.push(("F10", "Menu"));
@@ -77,5 +79,36 @@ pub(crate) fn active(model: &Model) -> Hints {
         (Some(d), _) => Cow::Borrowed(d.hints()),
         (None, Some(_)) => Cow::Borrowed(MENU_KEYS),
         (None, None) => Cow::Owned(main_hints(model)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{model_for_tests, model_without_changes_for_tests};
+
+    fn offers_stage(model: &Model) -> bool {
+        active(model).iter().any(|&(key, _)| key == "Space")
+    }
+
+    /// `Space Stage` compare su Changes solo quando Changes mostra la
+    /// working copy: sui file di un commit il tasto non fa nulla, e
+    /// proporlo direbbe il contrario.
+    #[test]
+    fn space_stage_is_offered_only_on_the_working_copy() {
+        let mut model = model_for_tests();
+        model.focus = Panel::Changes;
+        assert!(model.changes().is_working_copy());
+        assert!(offers_stage(&model));
+
+        model.focus = Panel::History;
+        assert!(!offers_stage(&model), "solo con il focus su Changes");
+
+        // Working copy pulita: History parte dal primo commit e Changes ne
+        // mostra i file.
+        let mut model = model_without_changes_for_tests();
+        model.focus = Panel::Changes;
+        assert!(!model.changes().is_working_copy());
+        assert!(!offers_stage(&model));
     }
 }

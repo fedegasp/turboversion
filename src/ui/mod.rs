@@ -139,10 +139,15 @@ fn draw_panel(f: &mut Frame, model: &mut Model, panel: Panel, area: Rect) {
             let (items, state) = list.parts_mut();
             panels::history::render(f, items, inner, sel, state);
         }
-        PanelContent::Files(list) => {
+        PanelContent::WorkingCopyFiles(list) => {
             let (items, state) = list.parts_mut();
-            panels::changes::render(f, items, inner, sel, state);
+            panels::changes::render_working_copy(f, items, inner, sel, state);
         }
+        PanelContent::CommitFiles(list) => {
+            let (items, state) = list.parts_mut();
+            panels::changes::render_commit(f, items, inner, sel, state);
+        }
+        PanelContent::ChangesNotice(notice) => panels::changes::render_notice(f, notice, inner),
         // Il limite dello scorrimento (`viewport`) serve solo a `update`:
         // al renderer basta sapere da quale riga partire.
         PanelContent::Diff { lines, scroll, .. } => panels::diff::render(f, lines, inner, *scroll),
@@ -215,7 +220,10 @@ mod tests {
                 model.remote_branches.selected_index(),
             ),
             (model.history().len(), model.history().selected_index()),
-            (model.files.len(), model.files.selected_index()),
+            (
+                model.working_copy_files.len(),
+                model.working_copy_files.selected_index(),
+            ),
         ];
         let mut out: Vec<usize> = lists
             .iter()
@@ -238,7 +246,7 @@ mod tests {
         let mut model = model_for_tests();
         model.focus = Panel::Changes;
         model.local_branches.select(1);
-        model.files.select(1);
+        model.working_copy_files.select(1);
         model.diff_scroll = 1;
 
         // Il primo frame assesta l'altezza del pannello Diff (che rientra
@@ -373,6 +381,76 @@ mod tests {
         let rows = focused_selection_rows(100, 30, &mut model);
         assert_eq!(rows.len(), 1, "una sola riga evidenziata: {rows:?}");
         assert!(rows[0].contains("origin/develop"), "{rows:?}");
+    }
+
+    /// Le righe del pannello Changes, a terminale stretto con il focus lì:
+    /// il pannello prende tutto il corpo e nient'altro finisce nel testo.
+    fn changes_panel_text(model: &mut Model) -> String {
+        model.focus = Panel::Changes;
+        render(60, 12, model)
+    }
+
+    /// La working copy ha la checkbox dello stage, i file di un commit no:
+    /// lì la checkbox vuota direbbe "non in stage" di un file per cui lo
+    /// stage non esiste.
+    #[test]
+    fn only_the_working_copy_files_have_a_stage_checkbox() {
+        let out = changes_panel_text(&mut model_for_tests());
+        assert!(out.contains("[x] M src/main.rs"), "{out}");
+
+        let out = changes_panel_text(&mut crate::app::model_without_changes_for_tests());
+        assert!(out.contains("A src/ui/menubar.rs"), "{out}");
+        assert!(!out.contains("[ ]") && !out.contains("[x]"), "{out}");
+    }
+
+    /// Su un commit senza una lista da elencare il pannello dice perché:
+    /// in arrivo, illeggibile, git non disponibile, oppure nessun file.
+    /// Un pannello vuoto non distinguerebbe questi quattro casi.
+    #[test]
+    fn the_changes_panel_says_why_a_commit_has_no_list() {
+        use crate::git::domain::CommitId;
+        use crate::git::repo::GitError;
+        use crate::msg::Msg;
+
+        // Working copy pulita: History parte dal primo commit, e i suoi
+        // file non sono ancora arrivati.
+        let pending = || {
+            let mut model = crate::app::model_for_tests();
+            let commits = crate::git::repo::Repo::commits(&crate::git::mock::MockGitRepo::new());
+            let id = commits[0].id.clone();
+            let cmds = crate::app::update(
+                &mut model,
+                Msg::Loaded {
+                    branches: Vec::new(),
+                    commits,
+                    files: Vec::new(),
+                    diff: Vec::new(),
+                },
+            );
+            assert_eq!(cmds.len(), 1, "i file del commit sono stati chiesti");
+            (model, id)
+        };
+        let arrive = |model: &mut Model, id: CommitId, result| {
+            crate::app::update(model, Msg::CommitFilesLoaded { id, result });
+        };
+
+        let (mut model, _) = pending();
+        assert!(changes_panel_text(&mut model).contains("Loading..."));
+
+        let (mut model, id) = pending();
+        arrive(&mut model, id, Err(GitError("Cannot read: broken".into())));
+        assert!(changes_panel_text(&mut model).contains("Cannot read: broken"));
+
+        let (mut model, _) = pending();
+        crate::app::update(&mut model, Msg::WorkerLost);
+        crate::app::update(&mut model, Msg::Enter);
+        // Il marcatore della barra di stato dice "Git unavailable" anche lui:
+        // si cerca il testo che solo il pannello scrive.
+        assert!(changes_panel_text(&mut model).contains("files not loaded"));
+
+        let (mut model, id) = pending();
+        arrive(&mut model, id, Ok(Vec::new()));
+        assert!(changes_panel_text(&mut model).contains("No files changed"));
     }
 
     #[test]

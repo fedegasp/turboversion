@@ -16,31 +16,57 @@
 //! `dialog_flow.rs` per quelli dei dialog, `menu.rs` per il menu — dove
 //! l'effetto è immediato: sul `Model`, o sul `Cmd` da restituire.
 
-use crate::git::domain::{Branch, BranchKind, Commit, FileEntry};
+use crate::git::domain::{Branch, BranchKind, Commit, CommitId, FileEntry};
 use crate::git::repo::GitError;
+use crate::msg::Cmd;
 
 use super::dialogs;
 use super::model::{Model, Overlay};
 
+/// Applica una lettura completa del repository. Restituisce la lettura dei
+/// file di un commit quando, dopo la rilettura, History seleziona un commit
+/// che il pannello Changes non sta già mostrando: al primo caricamento di
+/// una working copy pulita, o quando il commit selezionato prima non c'è
+/// più.
 pub(super) fn apply_loaded(
     model: &mut Model,
     branches: Vec<Branch>,
     commits: Vec<Commit>,
     files: Vec<FileEntry>,
     diff: Vec<String>,
-) {
+) -> Vec<Cmd> {
     let (local, remote) = split_branches(branches);
     model.local_branches.set(local);
     model.remote_branches.set(remote);
     // `files` è ciò che `Repo::files` ha letto dalla working copy: è qui,
     // al caricamento, che si decide se ci sono modifiche non committate.
     // Chiederlo più tardi al pannello Changes legherebbe la riga in cima a
-    // History a ciò che quel pannello sta mostrando.
+    // History a ciò che quel pannello sta mostrando, che può essere un
+    // commit.
     let working_copy_dirty = !files.is_empty();
-    model.files.set(files);
+    model.working_copy_files.set(files);
     model.set_history(commits, working_copy_dirty);
     model.diff = diff;
     model.diff_scroll = 0;
+    model
+        .sync_changes_with_history()
+        .map(Cmd::LoadCommitFiles)
+        .into_iter()
+        .collect()
+}
+
+/// Applica l'esito della lettura dei file di un commit, se il pannello
+/// Changes lo sta ancora aspettando; altrimenti è obsoleto e si scarta.
+///
+/// Un errore non apre un dialog: si mostra dentro il pannello, al posto
+/// della lista. Un dialog catturerebbe le frecce di chi sta scorrendo
+/// History, proprio mentre si allontana dal commit illeggibile.
+pub(super) fn apply_commit_files(
+    model: &mut Model,
+    id: CommitId,
+    result: Result<Vec<FileEntry>, GitError>,
+) {
+    model.receive_commit_files(&id, result.map_err(|err| err.to_string()));
 }
 
 /// Divide i riferimenti restituiti da `Repo::branches` nelle due liste che

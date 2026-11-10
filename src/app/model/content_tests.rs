@@ -41,7 +41,7 @@ fn each_panel_shows_its_own_list() {
     ));
     assert!(matches!(
         model.content_mut(Panel::Changes),
-        PanelContent::Files(..)
+        PanelContent::WorkingCopyFiles(..)
     ));
     assert!(matches!(
         model.content_mut(Panel::Diff),
@@ -78,7 +78,7 @@ fn the_history_panel_receives_the_rows_the_model_holds() {
     let mut model = model_for_tests();
     let expected = model.history().len();
     assert!(
-        !model.files.is_empty(),
+        !model.working_copy_files.is_empty(),
         "i dati di partenza hanno modifiche"
     );
 

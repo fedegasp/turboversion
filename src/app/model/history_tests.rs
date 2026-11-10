@@ -19,6 +19,7 @@ use ratatui::crossterm::event::KeyCode;
 /// lista, non il contenuto dei singoli commit.
 fn commit(hash: &str) -> Commit {
     Commit {
+        id: CommitId(hash.to_string()),
         graph: "*".to_string(),
         hash: hash.to_string(),
         msg: format!("commit {hash}"),
@@ -34,7 +35,10 @@ fn modified_file(path: &str) -> FileEntry {
     }
 }
 
-/// Rimpiazza i dati caricati, come farebbe l'esito di `Cmd::LoadAll`.
+/// Rimpiazza i dati caricati, come farebbe l'esito di `Cmd::LoadAll`. I
+/// `Cmd` che ne seguono (i file del commit selezionato) non vengono
+/// eseguiti: qui conta la forma di History, e questi commit sintetici il
+/// backend di prova non li conosce.
 fn load(app: &mut TestApp, commits: Vec<Commit>, files: Vec<FileEntry>) {
     update(
         &mut app.model,
@@ -45,6 +49,21 @@ fn load(app: &mut TestApp, commits: Vec<Commit>, files: Vec<FileEntry>) {
             diff: Vec::new(),
         },
     );
+}
+
+/// Muove il cursore di History senza eseguire i `Cmd` che ne seguono: i
+/// commit sintetici di questi test il backend di prova non li conosce, e
+/// la lettura dei loro file aprirebbe un dialog d'errore.
+fn step_history(app: &mut TestApp, msg: Msg) {
+    app.focus = Panel::History;
+    update(&mut app.model, msg);
+}
+
+fn selected_hash(app: &TestApp) -> Option<&str> {
+    match app.history.selected() {
+        Some(HistoryEntry::Commit(c)) => Some(c.hash.as_str()),
+        Some(HistoryEntry::WorkingCopy) | None => None,
+    }
 }
 
 fn history_hashes(app: &TestApp) -> Vec<&str> {
@@ -116,15 +135,15 @@ fn the_history_cursor_walks_the_uncommitted_row_and_the_commits_together() {
         Some(HistoryEntry::WorkingCopy)
     ));
 
-    press(&mut app, KeyCode::Down);
+    step_history(&mut app, Msg::Down);
     assert!(matches!(app.history.selected(), Some(HistoryEntry::Commit(c)) if c.hash == "aaa1111"));
-    press(&mut app, KeyCode::Down);
+    step_history(&mut app, Msg::Down);
     assert!(matches!(app.history.selected(), Some(HistoryEntry::Commit(c)) if c.hash == "bbb2222"));
-    press(&mut app, KeyCode::Down);
+    step_history(&mut app, Msg::Down);
     assert_eq!(app.history.selected_index(), Some(2), "ultima riga");
 
     for _ in 0..5 {
-        press(&mut app, KeyCode::Up);
+        step_history(&mut app, Msg::Up);
     }
     assert!(matches!(
         app.history.selected(),
@@ -132,62 +151,141 @@ fn the_history_cursor_walks_the_uncommitted_row_and_the_commits_together() {
     ));
 }
 
-/// Ricaricare sostituisce le righe di History e riporta il cursore in
-/// cima, anche se era su un commit: le righe sono nuove e quella
-/// selezionata può non esserci più. Chi vorrà ritrovare la selezione
-/// dovrà ancorarla all'identità della riga, non all'indice.
+/// Una rilettura ritrova la riga selezionata per identità, non per
+/// posizione: un commit nuovo in cima, o la riga della working copy che
+/// compare, spostano le righe ma non la selezione.
 #[test]
-fn reloading_brings_the_history_cursor_back_to_the_top() {
+fn reloading_keeps_the_selected_row_even_when_it_moves() {
     let mut app = TestApp::new();
     app.focus = Panel::History;
-    press(&mut app, KeyCode::Down);
-    press(&mut app, KeyCode::Down);
-    assert_eq!(app.history.selected_index(), Some(2));
-
     load(
         &mut app,
-        vec![commit("aaa1111"), commit("bbb2222")],
+        vec![commit("aaa1111"), commit("bbb2222"), commit("ccc3333")],
+        Vec::new(),
+    );
+    step_history(&mut app, Msg::Down);
+    assert_eq!(selected_hash(&app), Some("bbb2222"));
+
+    // Un commit nuovo in cima e la working copy sporca: due righe sopra.
+    load(
+        &mut app,
+        vec![
+            commit("ddd4444"),
+            commit("aaa1111"),
+            commit("bbb2222"),
+            commit("ccc3333"),
+        ],
         vec![modified_file("src/main.rs")],
     );
-    assert_eq!(app.history.selected_index(), Some(0));
+    assert_eq!(app.history.selected_index(), Some(3));
+    assert_eq!(selected_hash(&app), Some("bbb2222"));
+
+    // Anche la riga della working copy si ritrova, se c'è ancora.
+    for _ in 0..5 {
+        step_history(&mut app, Msg::Up);
+    }
+    load(
+        &mut app,
+        vec![commit("aaa1111")],
+        vec![modified_file("src/other.rs")],
+    );
     assert!(matches!(
         app.history.selected(),
         Some(HistoryEntry::WorkingCopy)
     ));
 }
 
-/// La riga in cima dipende dalla working copy letta al caricamento,
-/// non dal contenuto del pannello Changes: svuotare quel pannello non
-/// deve far sparire la riga, né riempirlo farla comparire.
+/// Se la working copy torna pulita la sua riga sparisce: il cursore che
+/// ci stava sopra scende sul commit più recente, che ne prende il posto.
 #[test]
-fn the_uncommitted_row_does_not_follow_the_changes_panel() {
+fn when_the_uncommitted_row_goes_away_the_cursor_falls_on_the_latest_commit() {
     let mut app = TestApp::new();
     load(
         &mut app,
-        vec![commit("aaa1111")],
+        vec![commit("aaa1111"), commit("bbb2222")],
         vec![modified_file("src/main.rs")],
     );
     assert!(matches!(
-        app.history.items().first(),
+        app.history.selected(),
         Some(HistoryEntry::WorkingCopy)
     ));
 
-    app.files.set(Vec::new());
-    app.rebuild_history();
+    load(
+        &mut app,
+        vec![commit("aaa1111"), commit("bbb2222")],
+        Vec::new(),
+    );
+    assert_eq!(selected_hash(&app), Some("aaa1111"));
+}
+
+/// Un commit che non c'è più (riscritto, o fuori dal log) lascia il
+/// cursore alla stessa altezza, dentro i limiti della lista nuova, invece
+/// di riportarlo in cima.
+#[test]
+fn a_selected_commit_that_is_gone_leaves_the_cursor_at_the_same_height() {
+    let mut app = TestApp::new();
+    app.focus = Panel::History;
+    load(
+        &mut app,
+        vec![commit("aaa1111"), commit("bbb2222"), commit("ccc3333")],
+        Vec::new(),
+    );
+    step_history(&mut app, Msg::Down);
+    assert_eq!(selected_hash(&app), Some("bbb2222"));
+
+    load(
+        &mut app,
+        vec![commit("aaa1111"), commit("eee5555"), commit("ccc3333")],
+        Vec::new(),
+    );
+    assert_eq!(selected_hash(&app), Some("eee5555"), "stessa altezza");
+
+    step_history(&mut app, Msg::Down);
+    load(&mut app, vec![commit("aaa1111")], Vec::new());
+    assert_eq!(selected_hash(&app), Some("aaa1111"), "limitato all'ultima");
+}
+
+/// La riga in cima dipende dalla working copy letta al caricamento, non
+/// da ciò che mostra il pannello Changes: guardare i file di un commit non
+/// la fa comparire su una working copy pulita, né sparire da una sporca.
+/// Se ne dipendesse, ogni cambio di selezione ricomporrebbe History e il
+/// cursore inseguirebbe le proprie ricariche.
+#[test]
+fn the_uncommitted_row_does_not_follow_the_changes_panel() {
+    let mut app = TestApp::new();
+    assert!(app.working_copy_dirty, "i dati di partenza hanno modifiche");
+    app.focus = Panel::History;
+    press(&mut app, KeyCode::Down);
+    assert!(
+        matches!(app.changes(), ChangesView::Commit(c) if c.files().is_some_and(|f| !f.is_empty())),
+        "Changes mostra i file di un commit"
+    );
     assert!(
         matches!(app.history.items().first(), Some(HistoryEntry::WorkingCopy)),
         "la working copy è ancora sporca: la riga resta"
     );
 
-    load(&mut app, vec![commit("aaa1111")], Vec::new());
-    app.files.set(vec![modified_file("src/main.rs")]);
-    app.rebuild_history();
+    // Working copy pulita, con Changes su un commit che ha dei file.
+    let commits = app.commits.clone();
+    let cmds = update(
+        &mut app.model,
+        Msg::Loaded {
+            branches: Vec::new(),
+            commits,
+            files: Vec::new(),
+            diff: Vec::new(),
+        },
+    );
+    app.run(cmds);
+    assert!(
+        matches!(app.changes(), ChangesView::Commit(c) if c.files().is_some_and(|f| !f.is_empty()))
+    );
     assert!(
         !app.history
             .items()
             .iter()
             .any(|e| matches!(e, HistoryEntry::WorkingCopy)),
-        "riempire il pannello Changes non committa nulla"
+        "i file di un commit non sono modifiche da committare"
     );
 }
 

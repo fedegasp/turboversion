@@ -10,7 +10,7 @@
 //! di rami locali; le altre scritture (stage, commit, checkout) arriveranno
 //! in passi successivi.
 
-use super::domain::{Branch, BranchKind, Commit, FileEntry, FileStatus};
+use super::domain::{Branch, BranchKind, Commit, CommitId, FileEntry, FileStatus};
 use super::repo::{GitError, Repo};
 use super::validate::{
     branch_already_exists, branch_not_found, current_branch_not_deletable, validate_branch_name,
@@ -116,6 +116,7 @@ impl Repo for GitRepo {
             .filter_map(Result::ok)
             .filter_map(|oid| self.repo.find_commit(oid).ok())
             .map(|commit| Commit {
+                id: CommitId(commit.id().to_string()),
                 // Semplificazione intenzionale: nessun grafo ASCII dei merge
                 // (è un problema a sé, fuori scopo per ora). Stesso simbolo
                 // per ogni riga, niente `─╮`/`─╯` come nei dati mock.
@@ -170,6 +171,68 @@ impl Repo for GitRepo {
                 })
             })
             .collect()
+    }
+
+    fn files_of_commit(&self, id: &CommitId) -> Result<Vec<FileEntry>, GitError> {
+        let short: String = id.as_str().chars().take(7).collect();
+        let context = format!("Cannot read the files of commit {short}");
+        let fail = |err: git2::Error| from_git2_while(&context, err);
+
+        let oid = git2::Oid::from_str(id.as_str()).map_err(fail)?;
+        let commit = self.repo.find_commit(oid).map_err(fail)?;
+        let tree = commit.tree().map_err(fail)?;
+        // Solo il primo parent, come `git show --first-parent`: per un
+        // merge, ciò che ha portato nel ramo su cui è stato fatto. Senza
+        // parent (il primo commit, o la radice di un ramo orfano) il
+        // confronto è con l'albero vuoto, cioè ogni file del commit risulta
+        // aggiunto.
+        let parent_tree = match commit.parents().next() {
+            Some(parent) => Some(parent.tree().map_err(fail)?),
+            None => None,
+        };
+        let diff = self
+            .repo
+            .diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None)
+            .map_err(fail)?;
+
+        Ok(diff
+            .deltas()
+            .filter_map(|delta| {
+                // Senza rilevamento delle rinomine (`find_similar`) un file
+                // spostato compare come un `Deleted` e un `Added`, che è
+                // anche ciò che il pannello sa mostrare.
+                let status = match delta.status() {
+                    git2::Delta::Added | git2::Delta::Copied => FileStatus::Added,
+                    git2::Delta::Deleted => FileStatus::Deleted,
+                    git2::Delta::Modified | git2::Delta::Renamed | git2::Delta::Typechange => {
+                        FileStatus::Modified
+                    }
+                    // Fra due alberi non compaiono: sono stati della working
+                    // copy o dell'indice.
+                    git2::Delta::Unmodified
+                    | git2::Delta::Ignored
+                    | git2::Delta::Untracked
+                    | git2::Delta::Unreadable
+                    | git2::Delta::Conflicted => return None,
+                };
+                // Un file cancellato esiste solo dal lato del parent, quindi
+                // si legge da lì; per gli altri vale il lato del commit, con
+                // il parent come ripiego. Fra due alberi ogni delta ha almeno
+                // un lato con un percorso: un delta senza alcun percorso non
+                // nominerebbe nessun file da elencare.
+                let (first, second) = if status == FileStatus::Deleted {
+                    (delta.old_file(), delta.new_file())
+                } else {
+                    (delta.new_file(), delta.old_file())
+                };
+                let path = first.path().or_else(|| second.path())?;
+                Some(FileEntry {
+                    path: path.to_string_lossy().into_owned(),
+                    status,
+                    staged: false,
+                })
+            })
+            .collect())
     }
 
     fn diff(&self) -> Vec<String> {
@@ -338,6 +401,211 @@ mod tests {
                 .unwrap();
         }
         repo
+    }
+
+    /// Committa su HEAD lo stato attuale dell'indice dopo aver scritto
+    /// `write` e cancellato `remove`, con i `parents` dati. Restituisce
+    /// l'identità del commit creato.
+    fn commit_changes(
+        repo: &git2::Repository,
+        write: &[(&str, &str)],
+        remove: &[&str],
+        parents: &[&git2::Commit<'_>],
+        message: &str,
+    ) -> git2::Oid {
+        let dir = repo.workdir().expect("repository con working copy");
+        let mut index = repo.index().unwrap();
+        for (path, content) in write {
+            fs::write(dir.join(path), content).unwrap();
+            index.add_path(Path::new(path)).unwrap();
+        }
+        for path in remove {
+            fs::remove_file(dir.join(path)).unwrap();
+            index.remove_path(Path::new(path)).unwrap();
+        }
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = repo.signature().unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, message, &tree, parents)
+            .unwrap()
+    }
+
+    fn head_commit(repo: &git2::Repository) -> git2::Commit<'_> {
+        repo.head().unwrap().peel_to_commit().unwrap()
+    }
+
+    /// I file di un commit come coppie (percorso, stato), ordinate per
+    /// percorso: l'ordine dei delta non è parte del contratto.
+    fn files_of(real: &GitRepo, oid: git2::Oid) -> Vec<(String, FileStatus)> {
+        let mut files: Vec<_> = real
+            .files_of_commit(&CommitId(oid.to_string()))
+            .expect("il commit esiste")
+            .into_iter()
+            .map(|f| {
+                assert!(!f.staged, "in un commit non c'è nulla in stage");
+                (f.path, f.status)
+            })
+            .collect();
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        files
+    }
+
+    #[test]
+    fn commits_carry_the_full_id_and_files_of_commit_accepts_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_a_commit(dir.path());
+        let head = head_commit(&repo).id();
+
+        let real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+        let commits = real.commits();
+
+        assert_eq!(commits[0].id, CommitId(head.to_string()));
+        assert!(commits[0].id.as_str().starts_with(&commits[0].hash));
+        assert!(real.files_of_commit(&commits[0].id).is_ok());
+    }
+
+    #[test]
+    fn files_of_the_root_commit_are_all_added() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_a_commit(dir.path());
+        let root = head_commit(&repo).id();
+
+        let real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(
+            files_of(&real, root),
+            [("README.md".to_string(), FileStatus::Added)]
+        );
+    }
+
+    #[test]
+    fn files_of_a_commit_are_its_changes_against_the_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_a_commit(dir.path());
+        let second = commit_changes(
+            &repo,
+            &[("keep.txt", "keep\n"), ("gone.txt", "gone\n")],
+            &[],
+            &[&head_commit(&repo)],
+            "Second",
+        );
+        let third = commit_changes(
+            &repo,
+            &[("README.md", "changed\n"), ("new.txt", "new\n")],
+            &["gone.txt"],
+            &[&head_commit(&repo)],
+            "Third",
+        );
+        // Modifiche lasciate nella working copy: non appartengono a nessun
+        // commit e non devono comparire.
+        fs::write(dir.path().join("keep.txt"), "dirty\n").unwrap();
+
+        let real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(
+            files_of(&real, third),
+            [
+                ("README.md".to_string(), FileStatus::Modified),
+                ("gone.txt".to_string(), FileStatus::Deleted),
+                ("new.txt".to_string(), FileStatus::Added),
+            ]
+        );
+        assert_eq!(
+            files_of(&real, second),
+            [
+                ("gone.txt".to_string(), FileStatus::Added),
+                ("keep.txt".to_string(), FileStatus::Added),
+            ],
+            "i file non toccati dal commit restano fuori"
+        );
+    }
+
+    #[test]
+    fn files_of_a_merge_are_compared_with_its_first_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_a_commit(dir.path());
+        let base = head_commit(&repo);
+
+        // Due linee di sviluppo dalla stessa base, ognuna con un file suo.
+        let side = commit_changes(&repo, &[("side.txt", "side\n")], &[], &[&base], "Side");
+        let side = repo.find_commit(side).unwrap();
+        repo.set_head_detached(base.id()).unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+            .unwrap();
+        let main = commit_changes(&repo, &[("main.txt", "main\n")], &[], &[&base], "Main");
+        let main = repo.find_commit(main).unwrap();
+
+        // Il merge contiene entrambi i file; rispetto al primo parent (la
+        // linea "main") l'unica novità è quello arrivato dall'altra.
+        let merge = commit_changes(
+            &repo,
+            &[("side.txt", "side\n")],
+            &[],
+            &[&main, &side],
+            "Merge side",
+        );
+
+        let real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(
+            files_of(&real, merge),
+            [("side.txt".to_string(), FileStatus::Added)]
+        );
+    }
+
+    #[test]
+    fn files_of_an_empty_commit_is_an_empty_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_a_commit(dir.path());
+        // Come `git commit --allow-empty`: stesso albero del parent.
+        let empty = commit_changes(&repo, &[], &[], &[&head_commit(&repo)], "Empty");
+
+        let real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(
+            real.files_of_commit(&CommitId(empty.to_string()))
+                .expect("il commit esiste")
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_renamed_file_shows_up_as_deleted_and_added() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_a_commit(dir.path());
+        // Stesso contenuto, percorso nuovo: per `git log --follow` è una
+        // rinomina, qui due file distinti perché le rinomine non si cercano.
+        let renamed = commit_changes(
+            &repo,
+            &[("MOVED.md", "hello\n")],
+            &["README.md"],
+            &[&head_commit(&repo)],
+            "Rename",
+        );
+
+        let real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(
+            files_of(&real, renamed),
+            [
+                ("MOVED.md".to_string(), FileStatus::Added),
+                ("README.md".to_string(), FileStatus::Deleted),
+            ]
+        );
+    }
+
+    #[test]
+    fn files_of_an_unknown_or_malformed_commit_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_a_commit(dir.path());
+        let real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+
+        for id in ["0123456789012345678901234567890123456789", "not-a-hash"] {
+            let err = real
+                .files_of_commit(&CommitId(id.to_string()))
+                .expect_err("nessun commit con questo id");
+            assert!(
+                err.to_string()
+                    .starts_with("Cannot read the files of commit"),
+                "il messaggio deve dire cosa si stava facendo: {err}"
+            );
+        }
     }
 
     #[test]

@@ -142,15 +142,33 @@ impl<T> ListPanel<T> {
         self.state.select(selected);
     }
 
+    /// Porta il cursore sul primo elemento che soddisfa `wanted`, e dice se
+    /// l'ha trovato; se non c'è, il cursore resta dov'era. Serve a ritrovare
+    /// una riga per identità dopo che la lista è stata sostituita.
+    pub(in crate::app) fn select_first(&mut self, wanted: impl FnMut(&T) -> bool) -> bool {
+        match self.items.iter().position(wanted) {
+            Some(index) => {
+                self.state.select(Some(index));
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Porta il cursore su `index`, limitato all'ultima riga esistente; su
-    /// una lista vuota non seleziona nulla. Serve ai test che posizionano la
-    /// selezione senza passare da `update`, compresi quelli di rendering in
-    /// `ui`: è l'unico metodo che muta e resta `pub(crate)`, ma essendo
-    /// compilato solo nei test non allenta il vincolo sul codice vero.
-    #[cfg(test)]
-    pub(crate) fn select(&mut self, index: usize) {
+    /// una lista vuota non seleziona nulla.
+    pub(in crate::app) fn select_nearest(&mut self, index: usize) {
         let last = self.len().checked_sub(1);
         self.state.select(last.map(|l| index.min(l)));
+    }
+
+    /// Come `select_nearest`, per i test che posizionano la selezione senza
+    /// passare da `update`, compresi quelli di rendering in `ui`: è l'unico
+    /// metodo che muta e resta `pub(crate)`, ma essendo compilato solo nei
+    /// test non allenta il vincolo sul codice vero.
+    #[cfg(test)]
+    pub(crate) fn select(&mut self, index: usize) {
+        self.select_nearest(index);
     }
 }
 
@@ -238,6 +256,20 @@ mod tests {
             *x = 99;
         }
         assert_eq!(p.items(), [0, 99, 2]);
+    }
+
+    #[test]
+    fn select_first_finds_an_item_or_leaves_the_cursor_alone() {
+        let mut p = panel(4);
+        assert!(p.select_first(|&x| x == 2));
+        assert_eq!(p.selected_index(), Some(2));
+
+        assert!(!p.select_first(|&x| x == 99));
+        assert_eq!(p.selected_index(), Some(2), "non trovato: resta dov'era");
+
+        let mut empty = panel(0);
+        assert!(!empty.select_first(|_| true));
+        assert_eq!(empty.selected_index(), None);
     }
 
     #[test]

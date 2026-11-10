@@ -16,8 +16,9 @@ changes and diff, all visible at once, navigable entirely from the keyboard.
 > in two separate panels; tags are still read from the repository (the
 > branch-name validation needs them) but aren't shown in any panel. When the
 > working copy has changes, History shows an "Uncommitted changes" row above
-> the log — selecting it doesn't change the other panels yet: Changes always
-> lists the working copy and Diff always shows the whole repository.
+> the log. The Changes panel follows the History selection: the working copy
+> on that row, the files touched by the selected commit on any other. The
+> Diff panel doesn't follow it yet: it always shows the whole repository.
 > Creating and deleting local branches writes to the repository for real;
 > staging and commits don't yet. `src/git/mock.rs` is now test-only fixture
 > data.
@@ -60,6 +61,13 @@ Vision touches.
   History panel lists it as its first row, with the graph, hash and author
   columns left empty — so it reads as "not committed yet" even without
   colors. With a clean working copy the row isn't there at all.
+- **Changes follows History**: select a commit and Changes lists the files
+  it touched, compared with its first parent (so a merge shows what it
+  brought into its branch); select the uncommitted row and you're back on
+  the working copy, with the cursor where you left it. While a commit's
+  files are loading, when they can't be read, or once git is no longer
+  available, the panel says so instead of going blank. Renames show up as a
+  delete plus an add.
 - **Keyboard-driven UX**: panel switching, list navigation, stage checkbox
   toggle (display only so far — see Status), diff scrolling — scrolling
   stops with the last line of the diff at the bottom of the panel, instead
@@ -78,8 +86,9 @@ Vision touches.
       commit log, working-tree status, diffs.
 - [x] Show the uncommitted working copy on top of the history.
 - [x] Branch creation/deletion (local branches). Checkout still missing.
-- [ ] Make Changes and Diff follow the History selection: the working copy
-      for the uncommitted row, the files and diff of the commit otherwise.
+- [x] Make Changes follow the History selection: the working copy for the
+      uncommitted row, the files of the commit otherwise.
+- [ ] Make Diff follow it too: the diff of the file selected in Changes.
 - [ ] Stage/unstage and commit from the UI.
 - [ ] Wire up the remaining menu actions. Working so far: `File > Quit`,
       `Help > About`, `Branch > New branch...` and `Branch > Delete` (both
@@ -112,7 +121,7 @@ cargo test
 |---|---|
 | `Tab` / `Shift+Tab` | Move focus to the next / previous panel (Branches, Remotes, History, Changes, Diff) |
 | `↑` / `k`, `↓` / `j` | Move selection (or scroll the diff, when focused) |
-| `Space` | Toggle the stage checkbox of the selected file (Changes panel) — display only: nothing is staged in the repository yet |
+| `Space` | Toggle the stage checkbox of the selected file (Changes panel, working copy only — ignored on a commit's files) — display only: nothing is staged in the repository yet |
 | `F10` | Open the menu bar |
 | `Alt` + letter | Open the corresponding menu directly |
 | `←` / `→` (menu open) | Switch menu |
@@ -136,9 +145,6 @@ cargo test
 > the Remotes panel focused but empty there is no branch to act on, so the
 > message is "No branch selected." instead.
 
-> **Note:** the History selection is reset to the top row whenever the
-> repository is read again, so it doesn't survive a reload yet.
-
 > **Note:** the Diff panel does not wrap long lines: it cuts them at the
 > right edge, like `less -S`. There is no horizontal scrolling, so the tail
 > of a line wider than the panel can't be read.
@@ -151,7 +157,10 @@ cargo test
 > action that would need git is refused with that same message instead of
 > failing silently. Restart to use git again. The refusal names the condition
 > but not the action refused, so a confirmed "Delete branch" turns into a bare
-> "Git unavailable", and text typed into "New branch" is lost.
+> "Git unavailable", and text typed into "New branch" is lost. Moving through
+> History never brings up that dialog: the files of the commit on screen, and
+> of the last commit you left, stay readable; any other commit shows
+> "Git unavailable: files not loaded".
 
 ### Dialogs
 
@@ -181,7 +190,9 @@ src/
 │   │                   inside app/, so drawing can't
 │   ├── model/          Model and its overlays; Model::content_mut(), the
 │   │                   single "panel -> data" table; HistoryEntry, the
-│   │                   History rows (the commits, plus the uncommitted one)
+│   │                   History rows (the commits, plus the uncommitted one);
+│   │                   changes.rs: what the Changes panel shows, the working
+│   │                   copy or a commit's files and whether they have arrived
 │   ├── dialogs.rs      Every dialog the app can show, built in one place:
 │   │                   one function per dialog, private to app/
 │   ├── menu.rs         The menu bar's items (MENUS) and its key handling
@@ -199,7 +210,7 @@ src/
 │   └── mod.rs        Key events -> Msg
 ├── git/
 │   ├── repo.rs       The Repo trait: the only boundary towards git
-│   ├── domain.rs     Branch, Commit, FileEntry: git as the app sees it
+│   ├── domain.rs     Branch, CommitId, Commit, FileEntry: git as the app sees it
 │   ├── git2.rs       Real repository backend, via `git2`
 │   ├── validate.rs   Branch-name rules and error messages, shared by backends
 │   └── mock.rs       Test-only fixture data

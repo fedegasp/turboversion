@@ -10,9 +10,11 @@ use crate::msg::{Cmd, Msg};
 use super::dialog_flow::update_dialog;
 use super::dialogs;
 use super::menu::{open_menu_by_hotkey, update_menu};
-use super::model::{max_diff_scroll, MenuState, Model, Overlay};
+use super::model::{max_diff_scroll, MenuState, Model, Overlay, PanelContent};
 use super::panel::Panel;
-use super::results::{apply_branch_created, apply_branch_deleted, apply_loaded};
+use super::results::{
+    apply_branch_created, apply_branch_deleted, apply_commit_files, apply_loaded,
+};
 
 pub(crate) fn update(model: &mut Model, msg: Msg) -> Vec<Cmd> {
     match msg {
@@ -37,8 +39,9 @@ pub(crate) fn update(model: &mut Model, msg: Msg) -> Vec<Cmd> {
             commits,
             files,
             diff,
-        } => {
-            apply_loaded(model, branches, commits, files, diff);
+        } => apply_loaded(model, branches, commits, files, diff),
+        Msg::CommitFilesLoaded { id, result } => {
+            apply_commit_files(model, id, result);
             Vec::new()
         }
         Msg::BranchCreated { name, result } => {
@@ -67,14 +70,32 @@ pub(crate) fn update(model: &mut Model, msg: Msg) -> Vec<Cmd> {
 /// aggiunto domani è coperto senza doverci ripensare. I `Msg` che non
 /// vengono da un tasto non passano di qui, e non devono: un esito o una
 /// misura del layout non chiedono niente a git.
+///
+/// Tutti i `Cmd` vengono scartati, ma il dialog compare solo se almeno uno
+/// era stato chiesto dall'utente (vedi `asked_by_the_user`): una lettura
+/// che segue la selezione, rifiutata con un dialog, ne aprirebbe uno a ogni
+/// freccia e renderebbe innavigabili proprio i dati che restano a schermo.
 fn refuse_if_git_is_gone(model: &mut Model, cmds: Vec<Cmd>) -> Vec<Cmd> {
     if cmds.is_empty() || model.git_available() {
         return cmds;
     }
-    model
-        .overlays
-        .push(Overlay::Dialog(dialogs::git_unavailable()));
+    if cmds.iter().any(asked_by_the_user) {
+        model
+            .overlays
+            .push(Overlay::Dialog(dialogs::git_unavailable()));
+    }
     Vec::new()
+}
+
+/// Se `cmd` è qualcosa che l'utente ha chiesto, e che quindi va rifiutato
+/// dicendolo, o una lettura che l'applicazione fa da sé per seguirne la
+/// navigazione. Il match è esaustivo: un `Cmd` nuovo non compila finché non
+/// si dice in quale dei due casi cade.
+fn asked_by_the_user(cmd: &Cmd) -> bool {
+    match cmd {
+        Cmd::LoadAll | Cmd::CreateBranch(_) | Cmd::DeleteBranch(_) => true,
+        Cmd::LoadCommitFiles(_) => false,
+    }
 }
 
 /// Smista un tasto all'overlay in cima allo stack, o ai pannelli se non
@@ -134,24 +155,40 @@ fn update_main(model: &mut Model, msg: Msg) -> Vec<Cmd> {
             .push(Overlay::Menu(MenuState { menu: 0, item: 0 })),
         Msg::Tab => model.focus = model.focus.next(),
         Msg::BackTab => model.focus = model.focus.prev(),
-        Msg::Up | Msg::Char { c: 'k', .. } => step(model, -1),
-        Msg::Down | Msg::Char { c: 'j', .. } => step(model, 1),
-        Msg::Char { c: ' ', .. } if model.focus == Panel::Changes => {
-            // Su una lista vuota non c'è alcun file selezionato (vedi
-            // l'invariante di `ListPanel`): niente da commutare.
-            if let Some(file) = model.files.selected_mut() {
-                file.staged = !file.staged;
-            }
-        }
+        Msg::Up | Msg::Char { c: 'k', .. } => return step(model, -1),
+        Msg::Down | Msg::Char { c: 'j', .. } => return step(model, 1),
+        Msg::Char { c: ' ', .. } if model.focus == Panel::Changes => toggle_stage(model),
         _ => {}
     }
     Vec::new()
 }
 
+/// Commuta lo stage del file selezionato in Changes, se Changes mostra la
+/// working copy. Passa da `content_mut` e non dal campo dei file della
+/// working copy: così raggiunge solo la lista che il pannello sta
+/// mostrando, e sui file di un commit — che non hanno un indice in cui
+/// entrare o da cui uscire — non trova nulla da commutare.
+fn toggle_stage(model: &mut Model) {
+    match model.content_mut(Panel::Changes) {
+        PanelContent::WorkingCopyFiles(list) => {
+            // Su una lista vuota non c'è alcun file selezionato (vedi
+            // l'invariante di `ListPanel`): niente da commutare.
+            if let Some(file) = list.selected_mut() {
+                file.staged = !file.staged;
+            }
+        }
+        PanelContent::CommitFiles(_) | PanelContent::ChangesNotice(_) => {}
+        // `content_mut(Panel::Changes)` non restituisce altro: ramo
+        // impossibile, che si chiude senza effetti.
+        PanelContent::Branches(_) | PanelContent::History(_) | PanelContent::Diff { .. } => {}
+    }
+}
+
 /// Muove di `delta` righe il pannello a fuoco, qualunque sia il suo
 /// contenuto: quale lista tocchi lo decide `Model::content_mut`, non questa
-/// funzione.
-fn step(model: &mut Model, delta: i32) {
+/// funzione. Su History il pannello Changes segue la nuova selezione, e
+/// per un commit ne chiede i file.
+fn step(model: &mut Model, delta: i32) -> Vec<Cmd> {
     let focus = model.focus;
     if focus == Panel::History {
         // Una nuova selezione mostra un commit diverso: lo scroll del diff
@@ -159,4 +196,56 @@ fn step(model: &mut Model, delta: i32) {
         model.diff_scroll = 0;
     }
     model.content_mut(focus).step(delta);
+    if focus != Panel::History {
+        return Vec::new();
+    }
+    model
+        .sync_changes_with_history()
+        .map(Cmd::LoadCommitFiles)
+        .into_iter()
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::domain::CommitId;
+
+    fn model_without_git() -> Model {
+        let mut model = Model::new();
+        model.lose_git();
+        model
+    }
+
+    fn navigation_read() -> Cmd {
+        Cmd::LoadCommitFiles(CommitId("abc".to_string()))
+    }
+
+    /// Una lettura che segue la navigazione, da sola, si scarta in
+    /// silenzio; insieme a un'azione chiesta dall'utente si scarta lo
+    /// stesso, ma il dialog compare: l'azione dell'utente va rifiutata
+    /// dicendolo, qualunque cosa la accompagni.
+    #[test]
+    fn without_git_a_user_action_is_refused_aloud_even_next_to_a_navigation_read() {
+        let mut model = model_without_git();
+        assert!(refuse_if_git_is_gone(&mut model, vec![navigation_read()]).is_empty());
+        assert!(model.dialog().is_none(), "solo navigazione: nessun dialog");
+
+        for cmds in [
+            vec![navigation_read(), Cmd::DeleteBranch("develop".to_string())],
+            vec![Cmd::CreateBranch("x".to_string()), navigation_read()],
+        ] {
+            let mut model = model_without_git();
+            assert!(refuse_if_git_is_gone(&mut model, cmds).is_empty());
+            assert!(model.dialog().is_some(), "azione dell'utente: dialog");
+        }
+    }
+
+    #[test]
+    fn with_git_every_cmd_goes_through() {
+        let mut model = Model::new();
+        let cmds = refuse_if_git_is_gone(&mut model, vec![navigation_read(), Cmd::LoadAll]);
+        assert_eq!(cmds.len(), 2);
+        assert!(model.dialog().is_none());
+    }
 }
