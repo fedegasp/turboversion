@@ -251,6 +251,7 @@ mod tests {
             Load::Loaded(FileDiff::Text(lines)) => format!("text, {} lines", lines.len()),
             Load::Loaded(FileDiff::Binary) => "binary".to_string(),
             Load::Loaded(FileDiff::NoTextChanges) => "no text changes".to_string(),
+            Load::Loaded(FileDiff::NestedRepository) => "nested repository".to_string(),
             Load::Failed(message) => format!("failed: {message}"),
             Load::Unavailable => "unavailable".to_string(),
         };

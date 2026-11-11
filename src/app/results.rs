@@ -16,8 +16,10 @@
 //! `dialog_flow.rs` per quelli dei dialog, `menu.rs` per il menu — dove
 //! l'effetto è immediato: sul `Model`, o sul `Cmd` da restituire.
 
+use crate::dialog::Dialog;
 use crate::git::domain::{Branch, BranchKind, Commit, CommitId, DiffTarget, FileDiff, FileEntry};
 use crate::git::repo::GitError;
+use crate::git::validate::validate_commit_message;
 use crate::msg::Cmd;
 
 use super::dialogs;
@@ -45,7 +47,7 @@ pub(super) fn apply_loaded(
     // History a ciò che quel pannello sta mostrando, che può essere un
     // commit.
     let working_copy_dirty = !files.is_empty();
-    model.working_copy_files.set(files);
+    model.set_working_copy_files(files);
     model.set_history(commits, working_copy_dirty);
     model.forget_working_copy_diff();
     model.follow_selection()
@@ -119,6 +121,71 @@ pub(super) fn apply_branch_created(
                 .push(Overlay::Dialog(dialogs::new_branch_retry(name, &err)));
         }
     }
+}
+
+/// Applica l'esito di uno stage o di un unstage. `failed` costruisce il
+/// dialog per l'errore, che dice quale delle due operazioni è fallita.
+///
+/// Riuscita, la scrittura non si riflette a mano sul `Model`: si rilegge il
+/// repository, che è l'unico a sapere che cosa ne è uscito (una directory
+/// non tracciata diventa i suoi file, un file aggiunto e tolto dallo stage
+/// torna non tracciato, un file in parte in stage vi entra tutto).
+pub(super) fn apply_staging_written(
+    model: &mut Model,
+    result: Result<(), GitError>,
+    failed: fn(&GitError) -> Dialog,
+) -> Vec<Cmd> {
+    match result {
+        Ok(()) => apply_working_copy_written(model),
+        Err(err) => {
+            model.overlays.push(Overlay::Dialog(failed(&err)));
+            Vec::new()
+        }
+    }
+}
+
+/// Applica l'esito di un commit. Riuscito, si rilegge il repository: il
+/// commit nuovo compare in cima a History e la riga "Uncommitted changes"
+/// sparisce se non resta nulla da committare; la selezione di History,
+/// ancorata alla riga, resta dov'era o passa al commit appena creato.
+///
+/// Fallito per il messaggio, il dialog si riapre con il messaggio digitato
+/// e l'errore; fallito per altro, lo si dice e basta. Quale dei due casi
+/// sia lo decide la stessa regola con cui il backend valuta il messaggio,
+/// non il testo dell'errore.
+pub(super) fn apply_committed(
+    model: &mut Model,
+    message: String,
+    result: Result<CommitId, GitError>,
+) -> Vec<Cmd> {
+    match result {
+        Ok(_) => apply_working_copy_written(model),
+        Err(err) => {
+            let dialog = if validate_commit_message(&message).is_some() {
+                dialogs::commit_retry(message, &err)
+            } else {
+                dialogs::commit_failed(&err)
+            };
+            model.overlays.push(Overlay::Dialog(dialog));
+            Vec::new()
+        }
+    }
+}
+
+/// Ciò che segue ogni scrittura riuscita sulla working copy o sull'indice:
+/// il diff della working copy a schermo può non essere più quello vero, e
+/// va dimenticato subito, non al ritorno della rilettura. Fra i due esiti
+/// l'utente può guardarlo, e la lettura che lo ha prodotto può essere
+/// partita prima della scrittura (vedi `Reading::receive`).
+///
+/// Si chiede la rilettura completa prima del diff: il worker le esegue in
+/// quest'ordine, quindi quando la rilettura torna il diff è ancora in volo,
+/// e la rilettura non ne chiede un secondo.
+fn apply_working_copy_written(model: &mut Model) -> Vec<Cmd> {
+    model.forget_working_copy_diff();
+    let mut cmds = vec![Cmd::LoadAll];
+    cmds.extend(model.follow_selection());
+    cmds
 }
 
 pub(super) fn apply_branch_deleted(model: &mut Model, name: String, result: Result<(), GitError>) {

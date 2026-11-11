@@ -20,9 +20,9 @@ changes and diff, all visible at once, navigable entirely from the keyboard.
 > on that row, the files touched by the selected commit on any other. The
 > Diff panel follows the Changes selection: it shows the diff of the selected
 > file only, in the same context (working copy or commit).
-> Creating and deleting local branches writes to the repository for real;
-> staging and commits don't yet. `src/git/mock.rs` is now test-only fixture
-> data.
+> Creating and deleting local branches, staging and unstaging files and
+> committing write to the repository for real; checkout, amend and stash
+> don't exist yet. `src/git/mock.rs` is now test-only fixture data.
 
 ## Preview
 
@@ -81,8 +81,20 @@ Vision touches.
   one read per panel is in flight at a time, so the rows you only pass over
   are mostly never read. Going back to one of the last commits you looked
   at shows its files and diff again without reading them.
-- **Keyboard-driven UX**: panel switching, list navigation, stage checkbox
-  toggle (display only so far — see Status), diff scrolling — scrolling
+- **Stage, unstage and commit**: `Space` on a working-copy file in Changes
+  stages it, or unstages it if it is fully staged; the checkbox shows `[x]`
+  for staged, `[ ]` for unstaged and `[~]` for a file staged only in part
+  (staged, then changed again), and `Space` on it stages the rest. Staging
+  a deleted file stages its deletion, an untracked directory is staged with
+  all the files in it, and unstaging a new file makes it untracked again
+  (also before the first commit). The checkbox changes when the repository,
+  read again after the write, says so — never ahead of it. `Commit >
+  Commit...` asks for a message and commits what is staged; an empty
+  message, or nothing staged, is refused with a message instead of making
+  an empty commit. The new commit shows up on top of History, and the
+  "Uncommitted changes" row goes away once nothing is left to commit.
+- **Keyboard-driven UX**: panel switching, list navigation, stage toggle,
+  diff scrolling — scrolling
   stops with the last line of the diff at the bottom of the panel, instead
   of pushing it to the top of an otherwise empty panel, and goes back to
   the top only when a different diff is shown.
@@ -103,11 +115,11 @@ Vision touches.
 - [x] Make Changes follow the History selection: the working copy for the
       uncommitted row, the files of the commit otherwise.
 - [x] Make Diff follow it too: the diff of the file selected in Changes.
-- [ ] Stage/unstage and commit from the UI.
+- [x] Stage/unstage and commit from the UI.
 - [ ] Wire up the remaining menu actions. Working so far: `File > Quit`,
-      `Help > About`, `Branch > New branch...` and `Branch > Delete` (both
-      now change the repository for real); the rest show a "not available
-      yet" dialog.
+      `Help > About`, `Branch > New branch...`, `Branch > Delete` and
+      `Commit > Commit...` (all three change the repository for real); the
+      rest show a "not available yet" dialog.
 - [ ] Repository picker (`File > Open repository...`, `Clone...`).
 
 ## Getting started
@@ -135,7 +147,7 @@ cargo test
 |---|---|
 | `Tab` / `Shift+Tab` | Move focus to the next / previous panel (Branches, Remotes, History, Changes, Diff) |
 | `↑` / `k`, `↓` / `j` | Move selection (or scroll the diff, when focused) |
-| `Space` | Toggle the stage checkbox of the selected file (Changes panel, working copy only — ignored on a commit's files) — display only: nothing is staged in the repository yet |
+| `Space` | Stage the selected file, or unstage it if it is fully staged (Changes panel, working copy only — ignored on a commit's files). The status bar says which one it will do |
 | `F10` | Open the menu bar |
 | `Alt` + letter | Open the corresponding menu directly |
 | `←` / `→` (menu open) | Switch menu |
@@ -164,10 +176,28 @@ cargo test
 > of a line wider than the panel can't be read.
 
 > **Note:** the diff of the working copy is read again every time the
-> repository is reloaded, even if nothing changed: for a moment the panel
-> says "Loading..." and the scroll position goes back to the top. An
-> untracked directory that is itself a Git repository shows "No text changes
-> to show", since its files belong to another repository.
+> repository is reloaded, even if nothing changed — and the repository is
+> reloaded after every stage, unstage and commit: for a moment the panel
+> says "Loading..." and the scroll position goes back to the top. For the
+> same reason, pressing `Space` twice in quick succession can stage a file
+> twice instead of staging and then unstaging it (the repository is not
+> harmed). An untracked directory that is itself a Git repository shows
+> "Nested repository" in the Diff panel, since its files belong to another
+> repository, and can't be staged from here: staging a directory that
+> contains one is refused with a message, without staging anything. Changes
+> lists such a directory as a single row, so its other files have to be
+> staged with `git`. A tracked submodule is different: when it points to a
+> new commit it is staged like any other change, and the Diff panel shows
+> the `-Subproject commit` / `+Subproject commit` lines, as `git diff` does.
+
+> **Note:** commits are created through `libgit2`, not by running
+> `git commit`. Git hooks (`pre-commit`, `commit-msg`, ...) don't run,
+> `commit.gpgsign` is ignored, so with signing configured the commit is
+> created **unsigned, without any warning**, and `commit.template` and
+> `commit.cleanup` are ignored too. The message is a single line of up to
+> 200 characters, so a body can't be written from here. A commit is
+> refused while a merge, rebase or similar operation is in progress: finish
+> it with `git` first.
 
 > **Note:** git work happens on a worker thread. If that thread dies — a
 > defect in the backend, or in `git2` itself — the app does not quit: it says
@@ -178,8 +208,8 @@ cargo test
 > same message instead of failing silently. Restart to use git again. The
 > refusal names the condition but not the action refused, so a confirmed
 > "Delete branch" turns into a bare "Git unavailable", and text typed into
-> "New branch" is lost. Moving through History never brings up that dialog:
-> the files of the last 8 commits you looked at, and the last 8 diffs you
+> "New branch" or "Commit" is lost. `Space` on a file gets the same refusal.
+> Moving through History never brings up that dialog: the files of the last 8 commits you looked at, and the last 8 diffs you
 > opened in those commits, stay readable; any other commit shows "Git
 > unavailable: files not loaded". The working copy's diff is not kept: back
 > on the "Uncommitted changes" row the file list is still there, but the Diff
@@ -234,7 +264,8 @@ src/
 │   ├── run.rs          The main loop: the only file in app/ that does I/O
 │   ├── test_support.rs Test-only helpers: a Model filled with the mock data
 │   └── tests/          Tests of update(); diff_follow.rs: the Diff panel
-│                       following Changes
+│                       following Changes; staging.rs: stage, unstage and
+│                       commit
 ├── msg.rs            Msg (incoming events) and Cmd (requested effects)
 ├── effects.rs        Runs a Cmd against Repo, produces the resulting Msg
 ├── worker.rs         Worker thread owning the Repo, so git never blocks the UI

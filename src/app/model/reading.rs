@@ -109,10 +109,10 @@ impl<K: PartialEq, T> Reading<K, T> {
     /// letture e scritture insieme, e gli esiti tornano nello stesso
     /// ordine; quando arriva l'esito di una scrittura, ogni lettura partita
     /// prima è quindi già tornata, e dimenticando il diff la lettura che lo
-    /// sostituisce parte dopo, ed è eseguita dopo la scrittura. Oggi
-    /// nessuna scrittura tocca la working copy, e l'unico chiamante è
-    /// `apply_loaded`, alla rilettura del repository; lo stage, l'unstage e
-    /// il commit dovranno rispettare l'obbligo.
+    /// sostituisce parte dopo, ed è eseguita dopo la scrittura. Lo
+    /// rispettano gli esiti di stage, unstage e commit (vedi
+    /// `results::apply_working_copy_written`), e `apply_loaded` alla
+    /// rilettura del repository.
     pub(super) fn receive(&mut self, key: &K, result: Result<T, String>) {
         if !self.is_awaiting() || self.key != *key {
             return;

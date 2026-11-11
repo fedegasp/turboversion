@@ -256,6 +256,7 @@ fn every_diff_without_lines_says_why_in_the_panel() {
     let cases = [
         (Ok(FileDiff::Binary), "Binary"),
         (Ok(FileDiff::NoTextChanges), "NoTextChanges"),
+        (Ok(FileDiff::NestedRepository), "NestedRepository"),
         (Err(GitError("boom".to_string())), "Failed(\"boom\")"),
     ];
     for (result, expected) in cases {

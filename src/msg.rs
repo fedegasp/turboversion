@@ -91,6 +91,24 @@ pub(crate) enum Msg {
         name: String,
         result: Result<(), GitError>,
     },
+    /// Esito di `Cmd::StageFile`. Il nuovo stato del file non c'è: lo si
+    /// rilegge dal repository. Il percorso nemmeno: l'errore lo nomina già,
+    /// e un esito riuscito non va confrontato con nulla, perché una
+    /// scrittura non diventa obsoleta come una lettura.
+    FileStaged {
+        result: Result<(), GitError>,
+    },
+    /// Esito di `Cmd::UnstageFile`, come `FileStaged`.
+    FileUnstaged {
+        result: Result<(), GitError>,
+    },
+    /// Esito di `Cmd::Commit`. `message` è il messaggio digitato, per
+    /// riproporlo nel dialog se il commit fallisce; in caso di successo
+    /// arriva l'identità del commit creato.
+    Committed {
+        message: String,
+        result: Result<CommitId, GitError>,
+    },
 }
 
 /// Effetto richiesto da `update`, da eseguire contro `Repo` (vedi
@@ -107,4 +125,10 @@ pub(crate) enum Cmd {
     LoadFileDiff(DiffTarget),
     CreateBranch(String),
     DeleteBranch(String),
+    /// Mette in stage il file della working copy con questo percorso.
+    StageFile(String),
+    /// Toglie dallo stage il file della working copy con questo percorso.
+    UnstageFile(String),
+    /// Crea un commit con ciò che è in stage e questo messaggio.
+    Commit(String),
 }

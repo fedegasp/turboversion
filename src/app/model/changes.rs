@@ -12,7 +12,7 @@
 //! contesto si legge il diff del file selezionato.
 
 use crate::app::list_panel::ListPanel;
-use crate::git::domain::{CommitId, FileEntry};
+use crate::git::domain::{CommitId, FileEntry, Staging};
 
 use super::reading::{Load, Reading};
 
@@ -29,9 +29,32 @@ pub(crate) enum ChangesView {
 
 impl ChangesView {
     /// Se il pannello mostra la working copy, l'unico caso in cui ha senso
-    /// mettere o togliere file dallo stage.
+    /// mettere o togliere file dallo stage (vedi `Model::stage_toggle`).
+    #[cfg(test)]
     pub(crate) fn is_working_copy(&self) -> bool {
         matches!(self, Self::WorkingCopy)
+    }
+}
+
+/// Che cosa fa `Space` sul file selezionato della working copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StageToggle {
+    Stage,
+    Unstage,
+}
+
+impl StageToggle {
+    /// Un file tutto in stage ne esce; uno fuori dallo stage, o in stage
+    /// solo in parte, vi entra per intero. Per il file in parte la scelta
+    /// è la stessa di una casella a tre stati: il primo `Space` completa
+    /// ciò che è stato iniziato, il secondo lo toglie tutto. L'opposto,
+    /// togliere dallo stage la parte già pronta, disferebbe con un tasto
+    /// un lavoro fatto a pezzi (`git add -p`) senza modo di rifarlo da qui.
+    pub(crate) fn for_staging(staging: Staging) -> Self {
+        match staging {
+            Staging::Staged => Self::Unstage,
+            Staging::Unstaged | Staging::Partly => Self::Stage,
+        }
     }
 }
 

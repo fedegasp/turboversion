@@ -25,6 +25,7 @@ pub(crate) fn render_notice(f: &mut Frame, notice: DiffNotice<'_>, area: Rect) {
         DiffNotice::FilesNotRead => "No diff: the files of this commit could not be read",
         DiffNotice::Binary => "Binary file: no text to show",
         DiffNotice::NoTextChanges => "No text changes to show",
+        DiffNotice::NestedRepository => "Nested repository: its files belong to another repository",
         DiffNotice::Failed(message) => message,
         DiffNotice::GitUnavailable => "Git unavailable: diff not loaded",
     };
@@ -163,6 +164,7 @@ mod tests {
         let cases = [
             (Ok(FileDiff::Binary), "Binary file: no text to show"),
             (Ok(FileDiff::NoTextChanges), "No text changes to show"),
+            (Ok(FileDiff::NestedRepository), "Nested repository"),
             (
                 Err(GitError("Cannot read: broken".into())),
                 "Cannot read: broken",

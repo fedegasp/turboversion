@@ -5,7 +5,8 @@
 // 2026-11-03 Federico Gasperini
 //
 
-//! Regole di validazione e messaggi d'errore condivisi dai backend `Repo`.
+//! Regole di validazione e messaggi d'errore condivisi dai backend `Repo`
+//! (nomi dei rami, messaggi di commit).
 //! Stanno qui, e non dentro un backend, perché la regola deve essere una
 //! sola: un nome rifiutato dal repository reale deve essere rifiutato anche
 //! dal mock, altrimenti i test della UI verificherebbero un comportamento
@@ -129,6 +130,27 @@ pub(crate) fn current_branch_not_deletable(name: &str) -> GitError {
     ))
 }
 
+/// Valida il messaggio di un commit: restituisce l'errore da mostrare se
+/// non va bene, `None` se è accettabile. L'unica regola è che dica
+/// qualcosa: git rifiuta un messaggio vuoto (o di soli spazi) a meno di
+/// `--allow-empty-message`, che qui non c'è.
+///
+/// La usa anche `app`, prima di chiedere il commit: è la stessa regola, e
+/// rifiutare lì evita di chiudere il dialog per riaprirlo con l'errore.
+pub(crate) fn validate_commit_message(message: &str) -> Option<GitError> {
+    message
+        .trim()
+        .is_empty()
+        .then(|| GitError("Commit message cannot be empty.".to_string()))
+}
+
+/// Errore per un commit chiesto senza nulla in stage: l'indice è uguale
+/// all'ultimo commit, e il commit non cambierebbe nulla. Come per un
+/// messaggio vuoto, git lo rifiuta a meno di `--allow-empty`.
+pub(crate) fn nothing_to_commit() -> GitError {
+    GitError("Nothing to commit: no changes are staged.".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,5 +252,12 @@ mod tests {
         assert!(remote.contains("remote"), "messaggio poco chiaro: {remote}");
         let tag = validate_branch_name("v0.1.0", &existing).unwrap();
         assert!(tag.contains("tag"), "messaggio poco chiaro: {tag}");
+    }
+
+    #[test]
+    fn a_commit_message_must_say_something() {
+        assert!(validate_commit_message("").is_some());
+        assert!(validate_commit_message("  \t ").is_some());
+        assert!(validate_commit_message("Fix the status bar").is_none());
     }
 }

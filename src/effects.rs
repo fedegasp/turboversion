@@ -46,6 +46,16 @@ pub(crate) fn run(cmd: Cmd, repo: &mut dyn Repo) -> Msg {
             let result = repo.delete_branch(&name);
             Msg::BranchDeleted { name, result }
         }
+        Cmd::StageFile(path) => Msg::FileStaged {
+            result: repo.stage_file(&path),
+        },
+        Cmd::UnstageFile(path) => Msg::FileUnstaged {
+            result: repo.unstage_file(&path),
+        },
+        Cmd::Commit(message) => {
+            let result = repo.commit(&message);
+            Msg::Committed { message, result }
+        }
     }
 }
 
@@ -153,5 +163,30 @@ mod tests {
         assert_eq!(name, "develop");
         assert!(result.is_ok());
         assert_eq!(repo.branches().len(), n - 1);
+    }
+
+    #[test]
+    fn write_cmds_report_their_outcome() {
+        let mut repo = MockGitRepo::new();
+
+        let Msg::FileStaged { result } = run(Cmd::StageFile("notes.txt".to_string()), &mut repo)
+        else {
+            panic!("expected Msg::FileStaged");
+        };
+        assert!(result.is_ok());
+
+        let Msg::FileUnstaged { result } = run(Cmd::UnstageFile("nope".to_string()), &mut repo)
+        else {
+            panic!("expected Msg::FileUnstaged");
+        };
+        assert!(result.is_ok(), "un percorso senza modifiche: nulla da fare");
+
+        let Msg::Committed { message, result } =
+            run(Cmd::Commit("Add notes".to_string()), &mut repo)
+        else {
+            panic!("expected Msg::Committed");
+        };
+        assert_eq!(message, "Add notes");
+        assert_eq!(result.ok(), Some(repo.commits()[0].id.clone()));
     }
 }

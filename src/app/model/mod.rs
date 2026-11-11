@@ -14,7 +14,7 @@ mod changes;
 mod navigation;
 mod reading;
 
-pub(crate) use changes::{ChangesView, CommitLoad};
+pub(crate) use changes::{ChangesView, CommitLoad, StageToggle};
 pub(crate) use navigation::DiffView;
 use navigation::InFlight;
 pub(crate) use reading::Load;
@@ -123,6 +123,9 @@ pub(crate) enum DiffNotice<'a> {
     /// Il file non ha righe cambiate da mostrare (vuoto, permessi, oppure
     /// non più modificato).
     NoTextChanges,
+    /// Il percorso è un repository annidato non tracciato: i suoi file non
+    /// appartengono a questo repository.
+    NestedRepository,
     /// La lettura è fallita; il messaggio è quello del backend.
     Failed(&'a str),
     /// Le operazioni git non sono più possibili: il diff non arriverà, o
@@ -360,6 +363,7 @@ impl Model {
                     Some(Load::Awaiting) => DiffNotice::Loading,
                     Some(Load::Loaded(FileDiff::Binary)) => DiffNotice::Binary,
                     Some(Load::Loaded(FileDiff::NoTextChanges)) => DiffNotice::NoTextChanges,
+                    Some(Load::Loaded(FileDiff::NestedRepository)) => DiffNotice::NestedRepository,
                     Some(Load::Failed(message)) => DiffNotice::Failed(message),
                     Some(Load::Unavailable) => DiffNotice::GitUnavailable,
                 };
@@ -373,7 +377,9 @@ impl Model {
     pub(super) fn diff_line_count(&self) -> usize {
         match self.diff.as_ref().map(Reading::load) {
             Some(Load::Loaded(FileDiff::Text(lines))) => lines.len(),
-            Some(Load::Loaded(FileDiff::Binary | FileDiff::NoTextChanges))
+            Some(Load::Loaded(
+                FileDiff::Binary | FileDiff::NoTextChanges | FileDiff::NestedRepository,
+            ))
             | Some(Load::Awaiting | Load::Failed(_) | Load::Unavailable)
             | None => 0,
         }
@@ -434,17 +440,37 @@ impl Model {
         // stato letto, `history` è la lista derivata. Il backend reale ne
         // carica al più qualche centinaio, non l'intero repository.
         entries.extend(self.commits.iter().cloned().map(HistoryEntry::Commit));
-
-        let old = std::mem::replace(&mut self.history, ListPanel::new(entries));
-        let (Some(index), Some(anchor)) = (old.selected_index(), old.selected()) else {
-            return;
-        };
-        if !self.history.select_first(|e| e.is_same_row(anchor)) {
-            self.history.select_nearest(index);
-        }
+        self.history
+            .set_keeping_selection(entries, HistoryEntry::is_same_row);
     }
 
-    /// Che cosa mostra il pannello Changes.
+    /// L'unico ingresso per i file della working copy riletti dal
+    /// repository. Il cursore resta sul file che era selezionato, ritrovato
+    /// per percorso: dopo uno stage o un unstage la lista si rilegge con lo
+    /// stesso file nello stesso posto, ed è lì che l'utente si aspetta di
+    /// restare.
+    pub(super) fn set_working_copy_files(&mut self, files: Vec<FileEntry>) {
+        self.working_copy_files
+            .set_keeping_selection(files, |a, b| a.path == b.path);
+    }
+
+    /// Che cosa farebbe `Space` nel pannello Changes: mettere in stage o
+    /// toglierne il file selezionato, con il suo percorso. `None` se
+    /// Changes mostra i file di un commit, che non hanno un indice, o se
+    /// la working copy non ha file. La usano sia `update`, per chiedere la
+    /// scrittura, sia la barra di stato, per dire che cosa farà il tasto:
+    /// la decisione è scritta una volta sola.
+    pub(crate) fn stage_toggle(&self) -> Option<(StageToggle, &str)> {
+        let file = match &self.changes {
+            ChangesView::WorkingCopy => self.working_copy_files.selected()?,
+            ChangesView::Commit(_) => return None,
+        };
+        Some((StageToggle::for_staging(file.staging), file.path.as_str()))
+    }
+
+    /// Che cosa mostra il pannello Changes, per i test: il codice vero
+    /// passa da `content_mut` o da `stage_toggle`.
+    #[cfg(test)]
     pub(crate) fn changes(&self) -> &ChangesView {
         &self.changes
     }

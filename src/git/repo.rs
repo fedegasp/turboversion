@@ -30,7 +30,8 @@ impl fmt::Display for GitError {
 }
 
 /// Confine unico verso git: letture (rami, commit, file, diff di un file)
-/// e le due operazioni mutanti supportate da questo prototipo.
+/// e le operazioni mutanti supportate da questo prototipo (rami, stage,
+/// commit).
 pub(crate) trait Repo {
     fn branches(&self) -> Vec<Branch>;
     fn commits(&self) -> Vec<Commit>;
@@ -39,7 +40,8 @@ pub(crate) trait Repo {
     /// I file toccati dal commit `id`: il confronto con il suo primo
     /// parent, o con l'albero vuoto per un commit senza parent. Per un
     /// merge è quindi ciò che il merge ha portato nel ramo su cui è stato
-    /// fatto. `staged` è sempre falso: in un commit non c'è un indice.
+    /// fatto. `staging` è sempre `Staging::Unstaged`: in un commit non c'è
+    /// un indice.
     ///
     /// A differenza delle altre letture restituisce un errore invece di
     /// una lista vuota: chi chiede un commit preciso deve poter distinguere
@@ -55,4 +57,20 @@ pub(crate) trait Repo {
     fn file_diff(&self, target: &DiffTarget) -> Result<FileDiff, GitError>;
     fn create_branch(&mut self, name: &str) -> Result<Branch, GitError>;
     fn delete_branch(&mut self, name: &str) -> Result<(), GitError>;
+    /// Mette nell'indice lo stato su disco di `path`, come `git add`: un
+    /// file modificato o non tracciato entra com'è, una directory non
+    /// tracciata (`dir/`) con tutti i file che contiene, un file cancellato
+    /// esce dall'indice (cioè la cancellazione entra nel prossimo commit).
+    /// Un file messo in stage solo in parte vi entra per intero.
+    fn stage_file(&mut self, path: &str) -> Result<(), GitError>;
+    /// Riporta `path` nell'indice com'è nell'ultimo commit, come
+    /// `git restore --staged`: le modifiche su disco restano. Un file che
+    /// nell'ultimo commit non c'è (aggiunto, o qualunque file prima del
+    /// primo commit) esce dall'indice e torna non tracciato.
+    fn unstage_file(&mut self, path: &str) -> Result<(), GitError>;
+    /// Crea un commit con il contenuto dell'indice e il messaggio dato, su
+    /// HEAD; prima del primo commit crea il commit radice. Rifiuta un
+    /// messaggio vuoto e un indice uguale all'ultimo commit, invece di
+    /// creare un commit senza modifiche.
+    fn commit(&mut self, message: &str) -> Result<CommitId, GitError>;
 }

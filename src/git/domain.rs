@@ -69,11 +69,30 @@ impl FileStatus {
     }
 }
 
+/// Quanto delle modifiche di un file della working copy è nell'indice,
+/// cioè finirebbe nel prossimo commit.
+///
+/// Tre stati e non un `bool` perché un file può essere in stage solo in
+/// parte: messo in stage e poi modificato di nuovo, o messo in stage a
+/// pezzi da un altro client (`git add -p`). Con un `bool` quel file
+/// sarebbe "in stage" e la parte non ancora in stage sparirebbe dalla
+/// lista, oppure "non in stage" e sparirebbe quella già pronta.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Staging {
+    /// Nessuna modifica nell'indice. È anche lo stato dei file di un
+    /// commit, dove un indice non c'è.
+    Unstaged,
+    /// Una parte delle modifiche è nell'indice, un'altra solo su disco.
+    Partly,
+    /// Tutte le modifiche sono nell'indice.
+    Staged,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct FileEntry {
     pub(crate) path: String,
     pub(crate) status: FileStatus,
-    pub(crate) staged: bool,
+    pub(crate) staging: Staging,
 }
 
 /// Rispetto a che cosa si guarda il diff di un file.
@@ -111,8 +130,11 @@ pub(crate) enum FileDiff {
     /// Il file è cambiato, ma non come testo: un binario non ha righe da
     /// confrontare.
     Binary,
+    /// Il percorso è (o contiene soltanto) un repository annidato non
+    /// tracciato: i suoi file appartengono a un altro repository, e qui non
+    /// hanno righe da confrontare.
+    NestedRepository,
     /// Nessuna riga da mostrare: un file vuoto aggiunto, un cambio dei soli
-    /// permessi, un repository annidato non tracciato, o un file che nel
-    /// frattempo non ha più modifiche.
+    /// permessi, o un file che nel frattempo non ha più modifiche.
     NoTextChanges,
 }

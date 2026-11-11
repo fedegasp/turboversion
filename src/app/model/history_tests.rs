@@ -31,7 +31,7 @@ fn modified_file(path: &str) -> FileEntry {
     FileEntry {
         path: path.to_string(),
         status: crate::git::domain::FileStatus::Modified,
-        staged: false,
+        staging: crate::git::domain::Staging::Unstaged,
     }
 }
 

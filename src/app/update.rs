@@ -10,10 +10,11 @@ use crate::msg::{Cmd, Msg};
 use super::dialog_flow::update_dialog;
 use super::dialogs;
 use super::menu::{open_menu_by_hotkey, update_menu};
-use super::model::{max_diff_scroll, MenuState, Model, Overlay, PanelContent};
+use super::model::{max_diff_scroll, MenuState, Model, Overlay, StageToggle};
 use super::panel::Panel;
 use super::results::{
-    apply_branch_created, apply_branch_deleted, apply_commit_files, apply_file_diff, apply_loaded,
+    apply_branch_created, apply_branch_deleted, apply_commit_files, apply_committed,
+    apply_file_diff, apply_loaded, apply_staging_written,
 };
 
 pub(crate) fn update(model: &mut Model, msg: Msg) -> Vec<Cmd> {
@@ -49,6 +50,11 @@ pub(crate) fn update(model: &mut Model, msg: Msg) -> Vec<Cmd> {
             apply_branch_deleted(model, name, result);
             Vec::new()
         }
+        Msg::FileStaged { result } => apply_staging_written(model, result, dialogs::stage_failed),
+        Msg::FileUnstaged { result } => {
+            apply_staging_written(model, result, dialogs::unstage_failed)
+        }
+        Msg::Committed { message, result } => apply_committed(model, message, result),
         // Le varianti restanti sono scorciatoie "di tasto" generiche: il
         // loro significato dipende da quale overlay è in cima (dialog >
         // menu > pannelli principali), vedi `dispatch_key`.
@@ -90,7 +96,12 @@ fn refuse_if_git_is_gone(model: &mut Model, cmds: Vec<Cmd>) -> Vec<Cmd> {
 /// si dice in quale dei due casi cade.
 fn asked_by_the_user(cmd: &Cmd) -> bool {
     match cmd {
-        Cmd::LoadAll | Cmd::CreateBranch(_) | Cmd::DeleteBranch(_) => true,
+        Cmd::LoadAll
+        | Cmd::CreateBranch(_)
+        | Cmd::DeleteBranch(_)
+        | Cmd::StageFile(_)
+        | Cmd::UnstageFile(_)
+        | Cmd::Commit(_) => true,
         Cmd::LoadCommitFiles(_) | Cmd::LoadFileDiff(_) => false,
     }
 }
@@ -154,34 +165,30 @@ fn update_main(model: &mut Model, msg: Msg) -> Vec<Cmd> {
         Msg::BackTab => model.focus = model.focus.prev(),
         Msg::Up | Msg::Char { c: 'k', .. } => return step(model, -1),
         Msg::Down | Msg::Char { c: 'j', .. } => return step(model, 1),
-        Msg::Char { c: ' ', .. } if model.focus == Panel::Changes => toggle_stage(model),
+        Msg::Char { c: ' ', .. } if model.focus == Panel::Changes => return toggle_stage(model),
         _ => {}
     }
     Vec::new()
 }
 
-/// Commuta lo stage del file selezionato in Changes, se Changes mostra la
-/// working copy. Passa da `content_mut` e non dal campo dei file della
-/// working copy: così raggiunge solo la lista che il pannello sta
-/// mostrando, e sui file di un commit — che non hanno un indice in cui
-/// entrare o da cui uscire — non trova nulla da commutare.
-fn toggle_stage(model: &mut Model) {
-    match model.content_mut(Panel::Changes) {
-        PanelContent::WorkingCopyFiles(list) => {
-            // Su una lista vuota non c'è alcun file selezionato (vedi
-            // l'invariante di `ListPanel`): niente da commutare.
-            if let Some(file) = list.selected_mut() {
-                file.staged = !file.staged;
-            }
-        }
-        PanelContent::CommitFiles(_) | PanelContent::ChangesNotice(_) => {}
-        // `content_mut(Panel::Changes)` non restituisce altro: ramo
-        // impossibile, che si chiude senza effetti.
-        PanelContent::Branches(_)
-        | PanelContent::History(_)
-        | PanelContent::Diff { .. }
-        | PanelContent::DiffNotice(_) => {}
-    }
+/// Chiede di mettere in stage il file selezionato in Changes, o di
+/// toglierlo, se Changes mostra la working copy: sui file di un commit —
+/// che non hanno un indice in cui entrare o da cui uscire — e su una lista
+/// vuota non c'è nulla da chiedere (vedi `Model::stage_toggle`).
+///
+/// Il `Model` non cambia qui: la casella del file cambia quando il
+/// repository, riletto dopo la scrittura, dice che cosa è successo davvero.
+/// Cambiarla subito mostrerebbe per un momento uno stato che, se la
+/// scrittura fallisce, non è mai esistito.
+fn toggle_stage(model: &Model) -> Vec<Cmd> {
+    let Some((toggle, path)) = model.stage_toggle() else {
+        return Vec::new();
+    };
+    let path = path.to_string();
+    vec![match toggle {
+        StageToggle::Stage => Cmd::StageFile(path),
+        StageToggle::Unstage => Cmd::UnstageFile(path),
+    }]
 }
 
 /// Muove di `delta` righe il pannello a fuoco, qualunque sia il suo
@@ -232,6 +239,9 @@ mod tests {
             vec![navigation_read(), Cmd::DeleteBranch("develop".to_string())],
             vec![Cmd::CreateBranch("x".to_string()), navigation_read()],
             vec![diff_read(), Cmd::DeleteBranch("develop".to_string())],
+            vec![navigation_read(), Cmd::StageFile("a.txt".to_string())],
+            vec![Cmd::UnstageFile("a.txt".to_string()), diff_read()],
+            vec![diff_read(), Cmd::Commit("message".to_string())],
         ] {
             let mut model = model_without_git();
             assert!(refuse_if_git_is_gone(&mut model, cmds).is_empty());

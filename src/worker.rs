@@ -235,6 +235,15 @@ mod tests {
         fn delete_branch(&mut self, _name: &str) -> Result<(), GitError> {
             panic!("repo rotto");
         }
+        fn stage_file(&mut self, _path: &str) -> Result<(), GitError> {
+            panic!("repo rotto");
+        }
+        fn unstage_file(&mut self, _path: &str) -> Result<(), GitError> {
+            panic!("repo rotto");
+        }
+        fn commit(&mut self, _message: &str) -> Result<CommitId, GitError> {
+            panic!("repo rotto");
+        }
     }
 
     #[test]
@@ -315,6 +324,15 @@ mod tests {
             unreachable!("non usato da questo test")
         }
         fn delete_branch(&mut self, _name: &str) -> Result<(), GitError> {
+            unreachable!("non usato da questo test")
+        }
+        fn stage_file(&mut self, _path: &str) -> Result<(), GitError> {
+            unreachable!("non usato da questo test")
+        }
+        fn unstage_file(&mut self, _path: &str) -> Result<(), GitError> {
+            unreachable!("non usato da questo test")
+        }
+        fn commit(&mut self, _message: &str) -> Result<CommitId, GitError> {
             unreachable!("non usato da questo test")
         }
     }

@@ -7,15 +7,20 @@
 
 //! Backend `Repo` su un repository reale, via `git2` (bindings a
 //! `libgit2`). Oltre alle letture gestisce la creazione e la cancellazione
-//! di rami locali; le altre scritture (stage, commit, checkout) arriveranno
-//! in passi successivi.
+//! di rami locali, lo stage e l'unstage di un file e il commit dell'indice;
+//! le altre scritture (checkout, amend, stash) arriveranno in passi
+//! successivi.
+
+use std::path::PathBuf;
 
 use super::domain::{
     Branch, BranchKind, Commit, CommitId, DiffSource, DiffTarget, FileDiff, FileEntry, FileStatus,
+    Staging,
 };
 use super::repo::{GitError, Repo};
 use super::validate::{
-    branch_already_exists, branch_not_found, current_branch_not_deletable, validate_branch_name,
+    branch_already_exists, branch_not_found, current_branch_not_deletable, nothing_to_commit,
+    validate_branch_name, validate_commit_message,
 };
 
 /// Limite al numero di commit letti da `commits()`: una cronologia reale può
@@ -97,12 +102,121 @@ impl GitRepo {
         self.repo
             .diff_tree_to_workdir_with_index(head_tree.as_ref(), Some(opts))
     }
+
+    /// Il commit a cui punta HEAD, o `None` prima del primo commit (HEAD
+    /// punta a un ramo che non esiste ancora). A differenza delle letture,
+    /// che in quel caso ripiegano in silenzio sull'albero vuoto, qui un
+    /// HEAD illeggibile per altre ragioni è un errore: una scrittura che
+    /// lo scambiasse per "nessun commit" toglierebbe dall'indice ogni file.
+    fn head_commit(&self) -> Result<Option<git2::Commit<'_>>, git2::Error> {
+        match self.repo.head() {
+            Ok(head) => head.peel_to_commit().map(Some),
+            Err(err)
+                if matches!(
+                    err.code(),
+                    git2::ErrorCode::UnbornBranch | git2::ErrorCode::NotFound
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Modifica l'indice con `edit` e lo salva su disco, oppure non lo
+    /// modifica affatto. L'indice che `git2` restituisce è una copia in
+    /// memoria condivisa da tutte le operazioni su questo repository: se
+    /// `edit` fallisse a metà, le voci già cambiate resterebbero lì, le
+    /// letture successive le mostrerebbero e la prossima scrittura riuscita
+    /// le salverebbe, mettendo in stage (e poi in un commit) file che
+    /// nessuno ha chiesto. Su un errore, quindi, la copia in memoria si
+    /// riallinea al disco prima di restituirlo.
+    fn edit_index(
+        &self,
+        context: &str,
+        edit: impl FnOnce(&git2::Repository, &mut git2::Index) -> Result<(), GitError>,
+    ) -> Result<(), GitError> {
+        let mut index = self
+            .fresh_index()
+            .map_err(|err| from_git2_while(context, err))?;
+        let outcome = edit(&self.repo, &mut index)
+            .and_then(|()| index.write().map_err(|err| from_git2_while(context, err)));
+        if let Err(err) = outcome {
+            // `force`: rilegge anche se il file su disco non è cambiato,
+            // scartando le modifiche in memoria.
+            return Err(match index.read(true) {
+                Ok(()) => err,
+                Err(reload) => GitError(format!(
+                    "{err} (and the index could not be reloaded: {}; restart \
+                     TurboVersion before staging again)",
+                    reload.message()
+                )),
+            });
+        }
+        Ok(())
+    }
+
+    /// L'indice del repository, riletto dal disco se un altro processo
+    /// (`git` da un terminale accanto) lo ha cambiato dopo l'ultima
+    /// lettura: una scrittura fatta sulla copia in memoria vecchia
+    /// annullerebbe in silenzio quella altrui.
+    fn fresh_index(&self) -> Result<git2::Index, git2::Error> {
+        let mut index = self.repo.index()?;
+        index.read(false)?;
+        Ok(index)
+    }
+}
+
+/// Il percorso di un repository annidato, se `delta` è uno: una directory
+/// non tracciata che libgit2 non apre perché ha un proprio `.git`, e che
+/// riporta come una voce di tipo albero o gitlink invece che come file.
+///
+/// Solo se non tracciata: un submodule è anch'esso un gitlink, ma è già
+/// nell'indice, e un suo commit cambiato si mette in stage (e si mostra
+/// nel diff) come ogni altra modifica.
+fn nested_repository(delta: git2::DiffDelta<'_>) -> Option<String> {
+    let file = delta.new_file();
+    let untracked_repo = delta.status() == git2::Delta::Untracked
+        && matches!(file.mode(), git2::FileMode::Tree | git2::FileMode::Commit);
+    untracked_repo
+        .then(|| file.path())
+        .flatten()
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+/// Lo stato dell'indice di un file della working copy, dai flag di
+/// `git status`: un file con flag `INDEX_*` ha qualcosa in stage, con flag
+/// `WT_*` qualcosa su disco che non lo è; con entrambi lo è solo in parte.
+fn staging_of(status: git2::Status) -> Staging {
+    let in_index = status.intersects(
+        git2::Status::INDEX_NEW
+            | git2::Status::INDEX_MODIFIED
+            | git2::Status::INDEX_DELETED
+            | git2::Status::INDEX_RENAMED
+            | git2::Status::INDEX_TYPECHANGE,
+    );
+    let on_disk_only = status.intersects(
+        git2::Status::WT_NEW
+            | git2::Status::WT_MODIFIED
+            | git2::Status::WT_DELETED
+            | git2::Status::WT_RENAMED
+            | git2::Status::WT_TYPECHANGE,
+    );
+    match (in_index, on_disk_only) {
+        (true, true) => Staging::Partly,
+        (true, false) => Staging::Staged,
+        (false, _) => Staging::Unstaged,
+    }
 }
 
 /// Le righe di una patch come le stampa `git diff`, e che cosa contiene:
-/// righe di testo, un binario, oppure niente da mostrare oltre
-/// l'intestazione.
+/// righe di testo, un binario, un repository annidato, oppure niente da
+/// mostrare oltre l'intestazione. Una directory con dentro sia file sia un
+/// repository annidato mostra le righe dei file.
 fn patch_of(diff: &git2::Diff<'_>) -> Result<FileDiff, git2::Error> {
+    let nested = diff
+        .deltas()
+        .any(|delta| nested_repository(delta).is_some());
     let mut patch = String::new();
     let mut text = false;
     let mut binary = false;
@@ -131,6 +245,10 @@ fn patch_of(diff: &git2::Diff<'_>) -> Result<FileDiff, git2::Error> {
         FileDiff::Text(patch.lines().map(str::to_string).collect())
     } else if binary {
         FileDiff::Binary
+    } else if nested {
+        // Prima di `NoTextChanges`: "niente da mostrare" direbbe che il
+        // percorso non è cambiato, mentre è un repository a sé.
+        FileDiff::NestedRepository
     } else {
         FileDiff::NoTextChanges
     })
@@ -229,28 +347,29 @@ impl Repo for GitRepo {
                 let path = entry.path().ok()?.to_string();
                 let status = entry.status();
                 // Un file può avere flag sia di INDEX_* che di WT_* insieme
-                // (es. staged e poi modificato di nuovo nel worktree):
-                // scegliamo deterministicamente lo stato dell'indice, perché
-                // è quello che finirebbe nel prossimo commit.
-                let (file_status, staged) = if status.contains(git2::Status::INDEX_NEW) {
-                    (FileStatus::Added, true)
+                // (es. staged e poi modificato di nuovo nel worktree): la
+                // lettera di stato è deterministicamente quella dell'indice,
+                // perché è ciò che finirebbe nel prossimo commit; che ci sia
+                // anche altro su disco lo dice `staging`.
+                let file_status = if status.contains(git2::Status::INDEX_NEW) {
+                    FileStatus::Added
                 } else if status.contains(git2::Status::INDEX_MODIFIED) {
-                    (FileStatus::Modified, true)
+                    FileStatus::Modified
                 } else if status.contains(git2::Status::INDEX_DELETED) {
-                    (FileStatus::Deleted, true)
+                    FileStatus::Deleted
                 } else if status.contains(git2::Status::WT_NEW) {
-                    (FileStatus::Untracked, false)
+                    FileStatus::Untracked
                 } else if status.contains(git2::Status::WT_MODIFIED) {
-                    (FileStatus::Modified, false)
+                    FileStatus::Modified
                 } else if status.contains(git2::Status::WT_DELETED) {
-                    (FileStatus::Deleted, false)
+                    FileStatus::Deleted
                 } else {
                     return None;
                 };
                 Some(FileEntry {
                     path,
                     status: file_status,
-                    staged,
+                    staging: staging_of(status),
                 })
             })
             .collect()
@@ -297,7 +416,7 @@ impl Repo for GitRepo {
                 Some(FileEntry {
                     path: path.to_string_lossy().into_owned(),
                     status,
-                    staged: false,
+                    staging: Staging::Unstaged,
                 })
             })
             .collect())
@@ -416,6 +535,183 @@ impl Repo for GitRepo {
             .delete()
             .map_err(|err| from_git2_while(&context, err))
     }
+
+    fn stage_file(&mut self, path: &str) -> Result<(), GitError> {
+        let context = format!("Cannot stage '{path}'");
+        let fail = |err: git2::Error| from_git2_while(&context, err);
+        self.edit_index(&context, |repo, index| {
+            // I file sotto `path` che su disco differiscono dall'indice: il
+            // file stesso, o tutti quelli di una directory non tracciata,
+            // che lo stato elenca come `dir/`. Il percorso si confronta alla
+            // lettera, come nel diff: un nome con `*` o `[` non trascina con
+            // sé altri file. Non `Index::add_all`, che fa la stessa cosa ma
+            // tratta il percorso come un glob anche quando gli si chiede di
+            // non farlo. I file ignorati restano fuori, come con `git add`.
+            let mut opts = git2::DiffOptions::new();
+            opts.pathspec(path)
+                .disable_pathspec_match(true)
+                .include_untracked(true)
+                .recurse_untracked_dirs(true)
+                .include_typechange(true);
+            let diff = repo
+                .diff_index_to_workdir(Some(index), Some(&mut opts))
+                .map_err(fail)?;
+
+            // Un repository annidato non si mette in stage: i suoi file
+            // appartengono a un altro repository, e libgit2 non sa
+            // aggiungerlo come gitlink. Lo si dice prima di toccare
+            // l'indice, così nemmeno i file accanto entrano a metà.
+            if let Some(nested) = diff.deltas().find_map(nested_repository) {
+                return Err(GitError(format!(
+                    "{context}: it contains a nested repository ({nested}) \
+                     and can't be staged from here. Use git from the command line."
+                )));
+            }
+
+            let changed: Vec<(PathBuf, bool)> = diff
+                .deltas()
+                .filter_map(|delta| {
+                    let on_disk = delta.new_file().exists();
+                    let file = delta
+                        .new_file()
+                        .path()
+                        .or_else(|| delta.old_file().path())?;
+                    Some((file.to_path_buf(), on_disk))
+                })
+                .collect();
+            for (file, on_disk) in changed {
+                if on_disk {
+                    index.add_path(&file).map_err(fail)?;
+                } else {
+                    // Il file non c'è più su disco: metterlo in stage vuol
+                    // dire mettere in stage la sua cancellazione, come
+                    // `git add` su un file cancellato.
+                    index.remove_path(&file).map_err(fail)?;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn unstage_file(&mut self, path: &str) -> Result<(), GitError> {
+        let context = format!("Cannot unstage '{path}'");
+        let fail = |err: git2::Error| from_git2_while(&context, err);
+        let head_tree = match self.head_commit().map_err(fail)? {
+            Some(commit) => Some(commit.tree().map_err(fail)?),
+            None => None,
+        };
+        self.edit_index(&context, |repo, index| {
+            // Le voci dell'indice che differiscono dall'ultimo commit sotto
+            // `path`, cercate con lo stesso confronto letterale di
+            // `stage_file`. Non `Repository::reset_default`, che fa la stessa
+            // cosa ma tratta il percorso come un glob, e che senza un commit
+            // non si può chiamare: qui l'albero assente è l'albero vuoto, e
+            // ogni voce sotto `path` esce dall'indice.
+            let mut opts = git2::DiffOptions::new();
+            opts.pathspec(path).disable_pathspec_match(true);
+            let changed: Vec<(PathBuf, Vec<u8>)> = repo
+                .diff_tree_to_index(head_tree.as_ref(), Some(index), Some(&mut opts))
+                .map_err(fail)?
+                .deltas()
+                .filter_map(|delta| {
+                    let side = if delta.new_file().path().is_some() {
+                        delta.new_file()
+                    } else {
+                        delta.old_file()
+                    };
+                    Some((side.path()?.to_path_buf(), side.path_bytes()?.to_vec()))
+                })
+                .collect();
+
+            for (file, raw_path) in changed {
+                let in_head = match head_tree.as_ref().map(|tree| tree.get_path(&file)) {
+                    Some(Ok(entry)) => Some(entry),
+                    Some(Err(err)) if err.code() == git2::ErrorCode::NotFound => None,
+                    Some(Err(err)) => return Err(fail(err)),
+                    None => None,
+                };
+                match in_head {
+                    // La voce torna quella dell'ultimo commit. I dati di
+                    // `stat` a zero costringono git a riconfrontare il file
+                    // su disco alla prossima lettura dello stato, invece di
+                    // fidarsi di date che non sono le sue.
+                    Some(entry) => {
+                        let mode = u32::try_from(entry.filemode()).map_err(|_| {
+                            GitError(format!(
+                                "{context}: invalid file mode {:o} in the last commit",
+                                entry.filemode()
+                            ))
+                        })?;
+                        index
+                            .add(&git2::IndexEntry {
+                                ctime: git2::IndexTime::new(0, 0),
+                                mtime: git2::IndexTime::new(0, 0),
+                                dev: 0,
+                                ino: 0,
+                                mode,
+                                uid: 0,
+                                gid: 0,
+                                file_size: 0,
+                                id: entry.id(),
+                                flags: 0,
+                                flags_extended: 0,
+                                path: raw_path,
+                            })
+                            .map_err(fail)?;
+                    }
+                    // Nell'ultimo commit il file non c'è: esce dall'indice,
+                    // e su disco resta come file non tracciato.
+                    None => index.remove_path(&file).map_err(fail)?,
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn commit(&mut self, message: &str) -> Result<CommitId, GitError> {
+        if let Some(err) = validate_commit_message(message) {
+            return Err(err);
+        }
+        let context = "Cannot commit";
+        let fail = |err: git2::Error| from_git2_while(context, err);
+
+        // Un merge, un cherry-pick o un rebase in corso vogliono un commit
+        // con i loro parent e i loro messaggi, e lasciano lo stato da
+        // chiudere: un commit semplice fatto da qui lascerebbe il
+        // repository a metà, con l'operazione ancora aperta.
+        if self.repo.state() != git2::RepositoryState::Clean {
+            return Err(GitError(format!(
+                "{context}: another operation (merge, rebase, ...) is in progress. \
+                 Finish it with git first."
+            )));
+        }
+        // L'autore si chiede prima di scrivere alcunché: senza `user.name`
+        // e `user.email` non c'è commit possibile.
+        let author = self.repo.signature().map_err(fail)?;
+        let parent = self.head_commit().map_err(fail)?;
+        let mut index = self.fresh_index().map_err(fail)?;
+        let tree_id = index.write_tree().map_err(fail)?;
+        let unchanged = match &parent {
+            Some(parent) => parent.tree_id() == tree_id,
+            None => index.is_empty(),
+        };
+        if unchanged {
+            return Err(nothing_to_commit());
+        }
+        let tree = self.repo.find_tree(tree_id).map_err(fail)?;
+        // Come `git commit`: spazi in coda alle righe e righe vuote in
+        // testa e in coda tolti, un a capo finale. Nessun carattere di
+        // commento: un `#` digitato resta nel messaggio.
+        let message = git2::message_prettify(message, None).map_err(fail)?;
+        let parents: Vec<&git2::Commit<'_>> = parent.iter().collect();
+        // `Some("HEAD")`: avanza il ramo corrente, o lo crea se è il primo
+        // commit.
+        let oid = self
+            .repo
+            .commit(Some("HEAD"), &author, &author, &message, &tree, &parents)
+            .map_err(fail)?;
+        Ok(CommitId(oid.to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -487,7 +783,11 @@ mod tests {
             .expect("il commit esiste")
             .into_iter()
             .map(|f| {
-                assert!(!f.staged, "in un commit non c'è nulla in stage");
+                assert_eq!(
+                    f.staging,
+                    Staging::Unstaged,
+                    "in un commit non c'è nulla in stage"
+                );
                 (f.path, f.status)
             })
             .collect();
@@ -738,11 +1038,606 @@ mod tests {
 
         let readme = files.iter().find(|f| f.path == "README.md").unwrap();
         assert_eq!(readme.status, FileStatus::Modified);
-        assert!(readme.staged);
+        assert_eq!(readme.staging, Staging::Staged);
 
         let notes = files.iter().find(|f| f.path == "notes.txt").unwrap();
         assert_eq!(notes.status, FileStatus::Untracked);
-        assert!(!notes.staged);
+        assert_eq!(notes.staging, Staging::Unstaged);
+    }
+
+    /// Stato e stage di `path` nella working copy, `None` se il file non
+    /// ha modifiche.
+    fn state_of(real: &GitRepo, path: &str) -> Option<(FileStatus, Staging)> {
+        real.files()
+            .into_iter()
+            .find(|f| f.path == path)
+            .map(|f| (f.status, f.staging))
+    }
+
+    fn open(dir: &Path) -> GitRepo {
+        GitRepo::discover(dir.to_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_file_staged_and_then_changed_again_is_partly_staged() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_a_commit(dir.path());
+        let mut real = open(dir.path());
+
+        fs::write(dir.path().join("README.md"), "hello\nfirst\n").unwrap();
+        real.stage_file("README.md").unwrap();
+        fs::write(dir.path().join("README.md"), "hello\nfirst\nsecond\n").unwrap();
+        assert_eq!(
+            state_of(&real, "README.md"),
+            Some((FileStatus::Modified, Staging::Partly))
+        );
+
+        // Lo stage di un file in parte in stage lo mette in stage tutto.
+        real.stage_file("README.md").unwrap();
+        assert_eq!(
+            state_of(&real, "README.md"),
+            Some((FileStatus::Modified, Staging::Staged))
+        );
+    }
+
+    #[test]
+    fn stage_and_unstage_a_modified_file_keep_its_content_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_a_commit(dir.path());
+        fs::write(dir.path().join("README.md"), "changed\n").unwrap();
+        let mut real = open(dir.path());
+        assert_eq!(
+            state_of(&real, "README.md"),
+            Some((FileStatus::Modified, Staging::Unstaged))
+        );
+
+        real.stage_file("README.md").unwrap();
+        assert_eq!(
+            state_of(&real, "README.md"),
+            Some((FileStatus::Modified, Staging::Staged))
+        );
+
+        real.unstage_file("README.md").unwrap();
+        assert_eq!(
+            state_of(&real, "README.md"),
+            Some((FileStatus::Modified, Staging::Unstaged))
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("README.md")).unwrap(),
+            "changed\n",
+            "l'unstage non tocca il file su disco"
+        );
+    }
+
+    #[test]
+    fn an_untracked_file_is_added_by_stage_and_untracked_again_by_unstage() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_a_commit(dir.path());
+        fs::write(dir.path().join("notes.txt"), "scratch\n").unwrap();
+        let mut real = open(dir.path());
+
+        real.stage_file("notes.txt").unwrap();
+        assert_eq!(
+            state_of(&real, "notes.txt"),
+            Some((FileStatus::Added, Staging::Staged))
+        );
+
+        real.unstage_file("notes.txt").unwrap();
+        assert_eq!(
+            state_of(&real, "notes.txt"),
+            Some((FileStatus::Untracked, Staging::Unstaged))
+        );
+        assert!(dir.path().join("notes.txt").exists());
+    }
+
+    /// Una directory non tracciata compare come `dir/`: metterla in stage
+    /// vi mette tutti i file che contiene, anche nelle sottodirectory.
+    #[test]
+    fn staging_an_untracked_directory_stages_the_files_it_contains() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_a_commit(dir.path());
+        fs::create_dir_all(dir.path().join("dir/sub")).unwrap();
+        fs::write(dir.path().join("dir/a.txt"), "a\n").unwrap();
+        fs::write(dir.path().join("dir/sub/b.txt"), "b\n").unwrap();
+        let mut real = open(dir.path());
+        assert_eq!(
+            state_of(&real, "dir/"),
+            Some((FileStatus::Untracked, Staging::Unstaged))
+        );
+
+        real.stage_file("dir/").unwrap();
+        for path in ["dir/a.txt", "dir/sub/b.txt"] {
+            assert_eq!(
+                state_of(&real, path),
+                Some((FileStatus::Added, Staging::Staged)),
+                "{path}"
+            );
+        }
+    }
+
+    /// Un file cancellato su disco: lo stage mette in stage la
+    /// cancellazione, l'unstage la toglie, e il file resta cancellato.
+    #[test]
+    fn staging_a_deleted_file_stages_its_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_a_commit(dir.path());
+        fs::remove_file(dir.path().join("README.md")).unwrap();
+        let mut real = open(dir.path());
+        assert_eq!(
+            state_of(&real, "README.md"),
+            Some((FileStatus::Deleted, Staging::Unstaged))
+        );
+
+        real.stage_file("README.md").unwrap();
+        assert_eq!(
+            state_of(&real, "README.md"),
+            Some((FileStatus::Deleted, Staging::Staged))
+        );
+
+        real.unstage_file("README.md").unwrap();
+        assert_eq!(
+            state_of(&real, "README.md"),
+            Some((FileStatus::Deleted, Staging::Unstaged))
+        );
+        assert!(!dir.path().join("README.md").exists());
+    }
+
+    /// Il percorso si confronta alla lettera: `a*.txt` non è un glob che
+    /// trascina con sé `ab.txt`, né nello stage né nell'unstage.
+    #[test]
+    fn stage_and_unstage_match_the_path_literally() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_a_commit(dir.path());
+        fs::write(dir.path().join("a*.txt"), "star\n").unwrap();
+        fs::write(dir.path().join("ab.txt"), "plain\n").unwrap();
+        let mut real = open(dir.path());
+
+        real.stage_file("a*.txt").unwrap();
+        assert_eq!(
+            state_of(&real, "a*.txt").map(|s| s.1),
+            Some(Staging::Staged)
+        );
+        assert_eq!(
+            state_of(&real, "ab.txt").map(|s| s.1),
+            Some(Staging::Unstaged)
+        );
+
+        real.stage_file("ab.txt").unwrap();
+        real.unstage_file("a*.txt").unwrap();
+        assert_eq!(
+            state_of(&real, "a*.txt").map(|s| s.1),
+            Some(Staging::Unstaged)
+        );
+        assert_eq!(
+            state_of(&real, "ab.txt").map(|s| s.1),
+            Some(Staging::Staged)
+        );
+    }
+
+    /// L'indice in stage nel file su disco, come lo leggerebbe `git`:
+    /// percorsi delle voci, ordinati.
+    fn index_on_disk(dir: &Path) -> Vec<String> {
+        let index = git2::Index::open(&dir.join(".git/index")).unwrap();
+        let mut paths: Vec<String> = index
+            .iter()
+            .map(|e| String::from_utf8_lossy(&e.path).into_owned())
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    /// Uno stage che fallisce a metà (il secondo file di una directory non
+    /// si legge) non lascia nulla di cambiato: né nello stato che l'app
+    /// mostra, né nell'indice su disco, né nella scrittura successiva o nel
+    /// commit che segue, che prendono solo ciò che è stato chiesto.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_stage_leaves_the_index_as_it_was() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_a_commit(dir.path());
+        fs::create_dir(dir.path().join("d")).unwrap();
+        fs::write(dir.path().join("d/a.txt"), "a\n").unwrap();
+        let locked = dir.path().join("d/b.txt");
+        fs::write(&locked, "b\n").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&locked).is_ok() {
+            // Da root, o su un filesystem che ignora i permessi, il file
+            // resta leggibile e lo stage non fallirebbe: il test non
+            // proverebbe nulla. Lo stesso esito è coperto dal test con
+            // `index.lock`, che non dipende dai permessi.
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
+            return;
+        }
+        fs::write(dir.path().join("README.md"), "changed\n").unwrap();
+        let mut real = open(dir.path());
+        let listed_before: Vec<_> = real
+            .files()
+            .into_iter()
+            .map(|f| (f.path, f.staging))
+            .collect();
+        let index_before = index_on_disk(dir.path());
+
+        let failed = real.stage_file("d/");
+
+        // Rimesso leggibile subito, perché la directory temporanea si
+        // possa cancellare anche se un'asserzione fallisce.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(failed.is_err(), "{failed:?}");
+        let listed_after: Vec<_> = real
+            .files()
+            .into_iter()
+            .map(|f| (f.path, f.staging))
+            .collect();
+        assert_eq!(listed_after, listed_before, "lo stato mostrato non cambia");
+        assert_eq!(index_on_disk(dir.path()), index_before);
+
+        real.stage_file("README.md").unwrap();
+        assert_eq!(index_on_disk(dir.path()), ["README.md"]);
+        let id = real.commit("Only the readme").unwrap();
+        assert_eq!(
+            files_of(&real, git2::Oid::from_str(id.as_str()).unwrap()),
+            [("README.md".to_string(), FileStatus::Modified)]
+        );
+        assert_eq!(head_commit(&repo).id().to_string(), id.as_str());
+    }
+
+    /// Con l'indice bloccato da un altro processo (`index.lock`) la
+    /// scrittura fallisce: lo stato mostrato e l'indice su disco restano
+    /// com'erano, e tolto il blocco lo stage successivo prende solo il file
+    /// chiesto, non quello dello stage fallito.
+    #[test]
+    fn a_stage_refused_by_a_locked_index_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_a_commit(dir.path());
+        fs::write(dir.path().join("notes.txt"), "notes\n").unwrap();
+        fs::write(dir.path().join("README.md"), "changed\n").unwrap();
+        let mut real = open(dir.path());
+        let listed_before: Vec<_> = real
+            .files()
+            .into_iter()
+            .map(|f| (f.path, f.staging))
+            .collect();
+        let index_before = index_on_disk(dir.path());
+        let lock = dir.path().join(".git/index.lock");
+        fs::write(&lock, "").unwrap();
+
+        let failed = real.stage_file("notes.txt");
+
+        fs::remove_file(&lock).unwrap();
+        assert!(failed.is_err(), "{failed:?}");
+        let listed_after: Vec<_> = real
+            .files()
+            .into_iter()
+            .map(|f| (f.path, f.staging))
+            .collect();
+        assert_eq!(listed_after, listed_before, "lo stato mostrato non cambia");
+        assert_eq!(index_on_disk(dir.path()), index_before);
+
+        real.stage_file("README.md").unwrap();
+        assert_eq!(index_on_disk(dir.path()), ["README.md"]);
+        assert_eq!(
+            state_of(&real, "notes.txt"),
+            Some((FileStatus::Untracked, Staging::Unstaged)),
+            "il file dello stage fallito non è entrato con l'altro"
+        );
+    }
+
+    /// Un repository con un submodule `sub` (un gitlink scritto a mano
+    /// nell'indice e committato) il cui repository ha poi avanzato di un
+    /// commit: il submodule è modificato.
+    fn repo_with_a_moved_submodule(dir: &Path) -> git2::Repository {
+        let repo = init_repo_with_a_commit(dir);
+        let sub = init_repo_with_a_commit(&dir.join("sub"));
+        let first = head_commit(&sub).id();
+        {
+            let mut index = repo.index().unwrap();
+            index
+                .add(&git2::IndexEntry {
+                    ctime: git2::IndexTime::new(0, 0),
+                    mtime: git2::IndexTime::new(0, 0),
+                    dev: 0,
+                    ino: 0,
+                    mode: 0o160000,
+                    uid: 0,
+                    gid: 0,
+                    file_size: 0,
+                    id: first,
+                    flags: 0,
+                    flags_extended: 0,
+                    path: b"sub".to_vec(),
+                })
+                .unwrap();
+            index.write().unwrap();
+            let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+            let sig = repo.signature().unwrap();
+            let parent = head_commit(&repo);
+            repo.commit(Some("HEAD"), &sig, &sig, "Add sub", &tree, &[&parent])
+                .unwrap();
+        }
+        commit_changes(
+            &sub,
+            &[("more.txt", "more\n")],
+            &[],
+            &[&head_commit(&sub)],
+            "Move",
+        );
+        repo
+    }
+
+    /// Un submodule è un gitlink come un repository annidato, ma è
+    /// tracciato: un suo commit cambiato si mette in stage come ogni altra
+    /// modifica, e il diff lo mostra come il cambio di commit.
+    #[test]
+    fn a_tracked_submodule_with_a_new_commit_is_staged_like_any_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = repo_with_a_moved_submodule(dir.path());
+        let moved = head_commit(&git2::Repository::open(dir.path().join("sub")).unwrap()).id();
+        let mut real = open(dir.path());
+        assert_eq!(
+            state_of(&real, "sub"),
+            Some((FileStatus::Modified, Staging::Unstaged))
+        );
+        let diff = text_of(&real, &wc("sub"));
+        assert!(diff.contains("Subproject commit"), "{diff}");
+
+        real.stage_file("sub").unwrap();
+
+        assert_eq!(
+            state_of(&real, "sub"),
+            Some((FileStatus::Modified, Staging::Staged))
+        );
+        let mut index = repo.index().unwrap();
+        index.read(true).unwrap();
+        assert_eq!(index.get_path(Path::new("sub"), 0).unwrap().id, moved);
+    }
+
+    /// Una directory non tracciata che contiene un repository annidato non
+    /// si mette in stage, con un messaggio che dice perché, e senza
+    /// mettere in stage nemmeno i file che le stanno accanto.
+    #[test]
+    fn staging_a_directory_with_a_nested_repository_is_refused_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_a_commit(dir.path());
+        fs::create_dir(dir.path().join("d")).unwrap();
+        fs::write(dir.path().join("d/a.txt"), "a\n").unwrap();
+        init_repo_with_a_commit(&dir.path().join("d/nested"));
+        let mut real = open(dir.path());
+        let index_before = index_on_disk(dir.path());
+
+        let err = real.stage_file("d/").unwrap_err();
+
+        assert!(err.0.contains("nested repository"), "{err}");
+        assert!(err.0.contains("d/nested"), "{err}");
+        assert!(err.0.contains("can't be staged from here"), "{err}");
+        assert!(!err.0.contains("one by one"), "{err}");
+        assert_eq!(index_on_disk(dir.path()), index_before);
+        assert!(
+            real.files().iter().all(|f| f.staging == Staging::Unstaged),
+            "{:?}",
+            real.files()
+        );
+        // I file accanto si mettono in stage uno per uno.
+        real.stage_file("d/a.txt").unwrap();
+        assert_eq!(
+            state_of(&real, "d/a.txt"),
+            Some((FileStatus::Added, Staging::Staged))
+        );
+    }
+
+    /// Un cambio dei soli permessi si mette in stage e se ne toglie come
+    /// ogni altra modifica, e l'unstage riporta nell'indice il modo
+    /// dell'ultimo commit.
+    #[cfg(unix)]
+    #[test]
+    fn a_change_of_permissions_only_is_staged_and_unstaged() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_a_commit(dir.path());
+        let readme = dir.path().join("README.md");
+        fs::set_permissions(&readme, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut real = open(dir.path());
+        let mode_in_index = || {
+            let mut index = repo.index().unwrap();
+            index.read(true).unwrap();
+            index.get_path(Path::new("README.md"), 0).unwrap().mode
+        };
+
+        real.stage_file("README.md").unwrap();
+        assert_eq!(
+            state_of(&real, "README.md"),
+            Some((FileStatus::Modified, Staging::Staged))
+        );
+        assert_eq!(mode_in_index(), 0o100755);
+
+        real.unstage_file("README.md").unwrap();
+        assert_eq!(
+            state_of(&real, "README.md"),
+            Some((FileStatus::Modified, Staging::Unstaged))
+        );
+        assert_eq!(mode_in_index(), 0o100644);
+    }
+
+    /// Un percorso è un prefisso solo come directory: `a.txt` non copre
+    /// `a.txt.bak`, né nello stage né nell'unstage.
+    #[test]
+    fn a_path_does_not_cover_a_file_it_is_a_prefix_of() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_a_commit(dir.path());
+        fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+        fs::write(dir.path().join("a.txt.bak"), "backup\n").unwrap();
+        let mut real = open(dir.path());
+
+        real.stage_file("a.txt").unwrap();
+        assert_eq!(state_of(&real, "a.txt").map(|s| s.1), Some(Staging::Staged));
+        assert_eq!(
+            state_of(&real, "a.txt.bak").map(|s| s.1),
+            Some(Staging::Unstaged)
+        );
+
+        real.stage_file("a.txt.bak").unwrap();
+        real.unstage_file("a.txt").unwrap();
+        assert_eq!(
+            state_of(&real, "a.txt").map(|s| s.1),
+            Some(Staging::Unstaged)
+        );
+        assert_eq!(
+            state_of(&real, "a.txt.bak").map(|s| s.1),
+            Some(Staging::Staged)
+        );
+    }
+
+    /// Una directory con dentro file e un repository annidato mostra le
+    /// righe dei file; il solo repository annidato ha il suo segnaposto.
+    #[test]
+    fn the_diff_of_a_directory_with_a_nested_repository_shows_its_files() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_a_commit(dir.path());
+        fs::create_dir(dir.path().join("d")).unwrap();
+        fs::write(dir.path().join("d/a.txt"), "a\n").unwrap();
+        init_repo_with_a_commit(&dir.path().join("d/nested"));
+        let real = open(dir.path());
+
+        assert!(text_of(&real, &wc("d/")).contains("+a"));
+        assert_eq!(
+            real.file_diff(&wc("d/nested/")),
+            Ok(FileDiff::NestedRepository)
+        );
+    }
+
+    /// Un repository appena creato, con l'identità di test configurata e
+    /// nessun commit.
+    fn init_empty_repo(dir: &Path) -> git2::Repository {
+        let repo = git2::Repository::init(dir).expect("init repo di test");
+        let mut config = repo.config().expect("config repo di test");
+        config.set_str("user.name", "Test User").unwrap();
+        config.set_str("user.email", "test@example.com").unwrap();
+        repo
+    }
+
+    /// Prima del primo commit non c'è un albero a cui riportare l'indice:
+    /// l'unstage toglie il file dall'indice, e il file torna non tracciato.
+    #[test]
+    fn unstage_works_before_the_first_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        init_empty_repo(dir.path());
+        fs::write(dir.path().join("first.txt"), "first\n").unwrap();
+        fs::write(dir.path().join("other.txt"), "other\n").unwrap();
+        let mut real = open(dir.path());
+
+        real.stage_file("first.txt").unwrap();
+        real.stage_file("other.txt").unwrap();
+        assert_eq!(
+            state_of(&real, "first.txt"),
+            Some((FileStatus::Added, Staging::Staged))
+        );
+
+        real.unstage_file("first.txt").unwrap();
+        assert_eq!(
+            state_of(&real, "first.txt"),
+            Some((FileStatus::Untracked, Staging::Unstaged))
+        );
+        assert_eq!(
+            state_of(&real, "other.txt"),
+            Some((FileStatus::Added, Staging::Staged)),
+            "gli altri file restano in stage"
+        );
+    }
+
+    #[test]
+    fn the_first_commit_becomes_the_root_of_the_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = init_empty_repo(dir.path());
+        fs::write(dir.path().join("first.txt"), "first\n").unwrap();
+        let mut real = open(dir.path());
+        real.stage_file("first.txt").unwrap();
+
+        let id = real.commit("Initial commit").unwrap();
+
+        let commits = real.commits();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].id, id);
+        assert_eq!(commits[0].msg, "Initial commit");
+        assert_eq!(head_commit(&repo).parent_count(), 0);
+        assert!(real.files().is_empty(), "working copy pulita");
+        assert_eq!(
+            files_of(&real, git2::Oid::from_str(id.as_str()).unwrap()),
+            [("first.txt".to_string(), FileStatus::Added)]
+        );
+    }
+
+    /// Il commit prende solo ciò che è in stage, ha l'ultimo commit come
+    /// parent, e il messaggio è ripulito come lo ripulisce `git commit`.
+    #[test]
+    fn a_commit_takes_only_what_is_staged_on_top_of_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_a_commit(dir.path());
+        let before = head_commit(&repo).id();
+        fs::write(dir.path().join("README.md"), "changed\n").unwrap();
+        fs::write(dir.path().join("later.txt"), "later\n").unwrap();
+        let mut real = open(dir.path());
+        real.stage_file("README.md").unwrap();
+
+        let id = real.commit("\n  Change the readme   \n\n").unwrap();
+
+        let head = head_commit(&repo);
+        assert_eq!(head.id().to_string(), id.as_str());
+        assert_eq!(head.parent_id(0).unwrap(), before);
+        assert_eq!(head.message().ok(), Some("  Change the readme\n"));
+        assert_eq!(
+            files_of(&real, head.id()),
+            [("README.md".to_string(), FileStatus::Modified)]
+        );
+        assert_eq!(
+            real.files()
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>(),
+            ["later.txt"],
+            "ciò che non era in stage resta nella working copy"
+        );
+    }
+
+    #[test]
+    fn a_commit_without_anything_staged_or_without_a_message_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_a_commit(dir.path());
+        let before = head_commit(&repo).id();
+        fs::write(dir.path().join("README.md"), "changed but not staged\n").unwrap();
+        let mut real = open(dir.path());
+
+        assert_eq!(real.commit("Nothing"), Err(nothing_to_commit()));
+
+        real.stage_file("README.md").unwrap();
+        assert!(real.commit("   ").is_err());
+        assert_eq!(head_commit(&repo).id(), before, "nessun commit creato");
+
+        let empty_dir = tempfile::tempdir().unwrap();
+        init_empty_repo(empty_dir.path());
+        assert_eq!(
+            open(empty_dir.path()).commit("Nothing"),
+            Err(nothing_to_commit()),
+            "anche prima del primo commit"
+        );
+    }
+
+    /// Con un merge in corso un commit semplice lascerebbe il merge aperto
+    /// e perderebbe il secondo parent: si rifiuta, senza scrivere nulla.
+    #[test]
+    fn a_commit_during_a_merge_in_progress_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_a_commit(dir.path());
+        let before = head_commit(&repo).id();
+        fs::write(repo.path().join("MERGE_HEAD"), format!("{before}\n")).unwrap();
+        fs::write(dir.path().join("README.md"), "changed\n").unwrap();
+        let mut real = open(dir.path());
+        real.stage_file("README.md").unwrap();
+
+        let err = real.commit("Merge").unwrap_err();
+        assert!(err.0.contains("in progress"), "{err}");
+        assert_eq!(head_commit(&repo).id(), before);
     }
 
     fn wc(path: &str) -> DiffTarget {
@@ -1053,7 +1948,10 @@ mod tests {
         let real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
         let listed = real.files();
         assert!(listed.iter().any(|f| f.path == "nested/"), "{listed:?}");
-        assert_eq!(real.file_diff(&wc("nested/")), Ok(FileDiff::NoTextChanges));
+        assert_eq!(
+            real.file_diff(&wc("nested/")),
+            Ok(FileDiff::NestedRepository)
+        );
     }
 
     #[test]

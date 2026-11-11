@@ -73,6 +73,28 @@ impl<T> ListPanel<T> {
         *self = Self::new(items);
     }
 
+    /// Sostituisce il contenuto tenendo il cursore sulla stessa riga, se
+    /// c'è ancora: `same` dice quando una riga nuova è quella selezionata
+    /// prima, per identità e non per posizione. Se non c'è più il cursore
+    /// resta alla stessa altezza, limitato alla lista nuova; su una lista
+    /// che era vuota parte dalla cima.
+    ///
+    /// Serve a ogni lista che si rilegge mentre l'utente ci sta sopra: senza,
+    /// una rilettura riporterebbe il cursore in cima.
+    pub(in crate::app) fn set_keeping_selection(
+        &mut self,
+        items: Vec<T>,
+        same: impl Fn(&T, &T) -> bool,
+    ) {
+        let old = std::mem::replace(self, Self::new(items));
+        let (Some(index), Some(anchor)) = (old.selected_index(), old.selected()) else {
+            return;
+        };
+        if !self.select_first(|item| same(item, anchor)) {
+            self.select_nearest(index);
+        }
+    }
+
     pub(crate) fn items(&self) -> &[T] {
         &self.items
     }
@@ -93,11 +115,6 @@ impl<T> ListPanel<T> {
 
     pub(crate) fn selected(&self) -> Option<&T> {
         self.selected_index().and_then(|i| self.items().get(i))
-    }
-
-    pub(in crate::app) fn selected_mut(&mut self) -> Option<&mut T> {
-        let i = self.selected_index()?;
-        self.items.get_mut(i)
     }
 
     /// Elementi e cursore insieme, come li vuole `render_stateful_widget`.
@@ -249,16 +266,6 @@ mod tests {
     }
 
     #[test]
-    fn selected_mut_edits_the_selected_item_only() {
-        let mut p = panel(3);
-        p.step(1);
-        if let Some(x) = p.selected_mut() {
-            *x = 99;
-        }
-        assert_eq!(p.items(), [0, 99, 2]);
-    }
-
-    #[test]
     fn select_first_finds_an_item_or_leaves_the_cursor_alone() {
         let mut p = panel(4);
         assert!(p.select_first(|&x| x == 2));
@@ -270,6 +277,24 @@ mod tests {
         let mut empty = panel(0);
         assert!(!empty.select_first(|_| true));
         assert_eq!(empty.selected_index(), None);
+    }
+
+    #[test]
+    fn set_keeping_selection_follows_the_row_or_stays_at_the_same_height() {
+        let mut p = ListPanel::new(vec![10, 20, 30]);
+        p.step(1);
+        p.set_keeping_selection(vec![5, 10, 20, 30], |a, b| a == b);
+        assert_eq!(p.selected(), Some(&20), "la riga si è spostata: la segue");
+
+        p.set_keeping_selection(vec![1, 2, 3], |a, b| a == b);
+        assert_eq!(p.selected_index(), Some(2), "sparita: stessa altezza");
+
+        p.set_keeping_selection(vec![1], |a, b| a == b);
+        assert_eq!(p.selected_index(), Some(0), "limitata alla lista nuova");
+
+        let mut empty = panel(0);
+        empty.set_keeping_selection(vec![7, 8], |a, b| a == b);
+        assert_eq!(empty.selected_index(), Some(0), "da vuota: in cima");
     }
 
     #[test]

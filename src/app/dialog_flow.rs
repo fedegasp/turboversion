@@ -6,7 +6,8 @@
 //
 
 use crate::dialog::{Action, Dialog};
-use crate::git::domain::BranchKind;
+use crate::git::domain::{BranchKind, Staging};
+use crate::git::validate::validate_commit_message;
 use crate::msg::{Cmd, Msg};
 
 use super::dialogs;
@@ -25,7 +26,7 @@ pub(super) fn update_dialog(model: &mut Model, msg: Msg) -> Vec<Cmd> {
         return Vec::new();
     };
     if accepted {
-        apply_dialog(dialog)
+        apply_dialog(model, dialog)
     } else {
         Vec::new()
     }
@@ -56,11 +57,41 @@ pub(super) fn ask_delete_branch(model: &mut Model) {
     model.overlays.push(Overlay::Dialog(dialog));
 }
 
+/// Apre il dialog del messaggio di commit, o dice subito che non c'è nulla
+/// da committare. Lo stage si guarda nei file della working copy già letti,
+/// anche se Changes sta mostrando un commit: il commit si fa sempre dalla
+/// working copy. Il backend rifà comunque il controllo sull'indice vero,
+/// che un altro client può aver cambiato.
+pub(super) fn ask_commit(model: &mut Model) {
+    let anything_staged = model
+        .working_copy_files
+        .items()
+        .iter()
+        .any(|f| f.staging != Staging::Unstaged);
+    let dialog = if anything_staged {
+        dialogs::commit()
+    } else {
+        dialogs::nothing_to_commit()
+    };
+    model.overlays.push(Overlay::Dialog(dialog));
+}
+
 /// Traduce l'accettazione di un dialog nell'effetto da richiedere, se c'è.
-fn apply_dialog(dialog: Dialog) -> Vec<Cmd> {
+fn apply_dialog(model: &mut Model, dialog: Dialog) -> Vec<Cmd> {
     match dialog.action {
         Action::Info => Vec::new(),
         Action::NewBranch => vec![Cmd::CreateBranch(dialog.input.trim().to_string())],
         Action::DeleteBranch(name) => vec![Cmd::DeleteBranch(name)],
+        Action::Commit => {
+            // Un messaggio vuoto si rifiuta qui, con la regola del backend:
+            // il dialog si riapre con l'errore senza passare dal worker.
+            if let Some(err) = validate_commit_message(&dialog.input) {
+                model
+                    .overlays
+                    .push(Overlay::Dialog(dialogs::commit_retry(dialog.input, &err)));
+                return Vec::new();
+            }
+            vec![Cmd::Commit(dialog.input.trim().to_string())]
+        }
     }
 }

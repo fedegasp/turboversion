@@ -6,8 +6,9 @@
 //
 
 //! Pannello "Changes": i file della working copy, con la checkbox dello
-//! stage, oppure i file toccati dal commit selezionato in History, senza
-//! checkbox perché un commit non ha un indice. Quale delle due liste
+//! stage (`[x]` in stage, `[~]` in stage solo in parte, `[ ]` no), oppure
+//! i file toccati dal commit selezionato in History, senza checkbox perché
+//! un commit non ha un indice. Quale delle due liste
 //! arrivi lo decide il `Model`; qui si sceglie solo come appaiono. Quando
 //! un commit non ha una lista da elencare (file in arrivo, lettura
 //! fallita, git non più disponibile, commit vuoto) il pannello lo dice con
@@ -23,7 +24,7 @@ use ratatui::{
 };
 
 use crate::app::ChangesNotice;
-use crate::git::domain::{FileEntry, FileStatus};
+use crate::git::domain::{FileEntry, FileStatus, Staging};
 use crate::ui::text::fit;
 use crate::ui::theme;
 
@@ -42,7 +43,13 @@ pub(crate) fn render_working_copy(
     let items: Vec<ListItem> = files
         .iter()
         .map(|e| {
-            let mark = if e.staged { "[x]" } else { "[ ]" };
+            let mark = match e.staging {
+                Staging::Staged => "[x]",
+                // `~` e non un glifo come `▪` o `◐`: ASCII, quindi largo
+                // una colonna su ogni terminale.
+                Staging::Partly => "[~]",
+                Staging::Unstaged => "[ ]",
+            };
             let mut spans = vec![Span::raw(format!("{mark} "))];
             spans.extend(status_and_path(e, path_w));
             ListItem::new(Line::from(spans))

@@ -18,9 +18,13 @@
 
 use super::domain::{
     Branch, BranchKind, Commit, CommitId, DiffSource, DiffTarget, FileDiff, FileEntry, FileStatus,
+    Staging,
 };
 use super::repo::{GitError, Repo};
-use super::validate::{branch_not_found, current_branch_not_deletable, validate_branch_name};
+use super::validate::{
+    branch_not_found, current_branch_not_deletable, nothing_to_commit, validate_branch_name,
+    validate_commit_message,
+};
 
 fn initial_branches() -> Vec<Branch> {
     [
@@ -64,17 +68,17 @@ fn initial_commits() -> Vec<Commit> {
 
 fn initial_files() -> Vec<FileEntry> {
     [
-        ("src/main.rs", FileStatus::Modified, true),
-        ("src/theme.rs", FileStatus::Modified, false),
-        ("src/ui.rs", FileStatus::Added, false),
-        ("README.md", FileStatus::Deleted, false),
-        ("notes.txt", FileStatus::Untracked, false),
+        ("src/main.rs", FileStatus::Modified, Staging::Staged),
+        ("src/theme.rs", FileStatus::Modified, Staging::Unstaged),
+        ("src/ui.rs", FileStatus::Added, Staging::Unstaged),
+        ("README.md", FileStatus::Deleted, Staging::Unstaged),
+        ("notes.txt", FileStatus::Untracked, Staging::Unstaged),
     ]
     .into_iter()
-    .map(|(path, status, staged)| FileEntry {
+    .map(|(path, status, staging)| FileEntry {
         path: path.to_string(),
         status,
-        staged,
+        staging,
     })
     .collect()
 }
@@ -117,7 +121,7 @@ fn initial_commit_files() -> Vec<(CommitId, Vec<FileEntry>)> {
                 .map(|&(path, status)| FileEntry {
                     path: path.to_string(),
                     status,
-                    staged: false,
+                    staging: Staging::Unstaged,
                 })
                 .collect();
             (CommitId(hash.to_string()), files)
@@ -188,6 +192,9 @@ pub(crate) struct MockGitRepo {
     commits: Vec<Commit>,
     commit_files: Vec<(CommitId, Vec<FileEntry>)>,
     files: Vec<FileEntry>,
+    /// Le directory non tracciate fra `files`, con i file che contengono:
+    /// lo stage le sostituisce con quei file.
+    untracked_dirs: Vec<(String, Vec<String>)>,
 }
 
 impl MockGitRepo {
@@ -197,7 +204,27 @@ impl MockGitRepo {
             commits: initial_commits(),
             commit_files: initial_commit_files(),
             files: initial_files(),
+            untracked_dirs: Vec::new(),
         }
+    }
+
+    /// Lo stesso backend con in più una directory non tracciata `dir`
+    /// (con la `/` finale, come la elenca lo stato) che contiene `files`,
+    /// inserita nella working copy alla posizione `at`.
+    pub(crate) fn with_untracked_dir(mut self, at: usize, dir: &str, files: &[&str]) -> Self {
+        self.files.insert(
+            at,
+            FileEntry {
+                path: dir.to_string(),
+                status: FileStatus::Untracked,
+                staging: Staging::Unstaged,
+            },
+        );
+        self.untracked_dirs.push((
+            dir.to_string(),
+            files.iter().map(|f| f.to_string()).collect(),
+        ));
+        self
     }
 }
 
@@ -293,6 +320,93 @@ impl Repo for MockGitRepo {
         self.branches.remove(index);
         Ok(())
     }
+
+    /// Lo stage di un file in memoria: un file non tracciato diventa
+    /// aggiunto, come nel backend reale, e una directory non tracciata
+    /// diventa i file che contiene, nella stessa posizione. Un percorso
+    /// senza modifiche non cambia nulla, come nel backend reale.
+    fn stage_file(&mut self, path: &str) -> Result<(), GitError> {
+        if let Some(at) = self.untracked_dirs.iter().position(|(dir, _)| dir == path) {
+            let (_, contents) = self.untracked_dirs.remove(at);
+            if let Some(index) = self.files.iter().position(|f| f.path == path) {
+                let staged = contents.into_iter().map(|path| FileEntry {
+                    path,
+                    status: FileStatus::Added,
+                    staging: Staging::Staged,
+                });
+                self.files.splice(index..=index, staged);
+            }
+            return Ok(());
+        }
+        let Some(file) = self.files.iter_mut().find(|f| f.path == path) else {
+            return Ok(());
+        };
+        if file.status == FileStatus::Untracked {
+            file.status = FileStatus::Added;
+        }
+        file.staging = Staging::Staged;
+        Ok(())
+    }
+
+    /// L'unstage in memoria: un file aggiunto torna non tracciato, come
+    /// nel backend reale; un percorso senza modifiche non cambia nulla.
+    fn unstage_file(&mut self, path: &str) -> Result<(), GitError> {
+        let Some(file) = self.files.iter_mut().find(|f| f.path == path) else {
+            return Ok(());
+        };
+        if file.status == FileStatus::Added {
+            file.status = FileStatus::Untracked;
+        }
+        file.staging = Staging::Unstaged;
+        Ok(())
+    }
+
+    /// Il commit in memoria: i file in stage escono dalla working copy ed
+    /// entrano in un commit nuovo in cima al log; quelli in stage solo in
+    /// parte vi entrano e restano nella working copy con il resto. Stesse
+    /// regole del backend reale su messaggio e stage vuoto.
+    fn commit(&mut self, message: &str) -> Result<CommitId, GitError> {
+        if let Some(err) = validate_commit_message(message) {
+            return Err(err);
+        }
+        let committed: Vec<FileEntry> = self
+            .files
+            .iter()
+            .filter(|f| f.staging != Staging::Unstaged)
+            .map(|f| FileEntry {
+                path: f.path.clone(),
+                status: f.status,
+                staging: Staging::Unstaged,
+            })
+            .collect();
+        if committed.is_empty() {
+            return Err(nothing_to_commit());
+        }
+        self.files.retain(|f| f.staging != Staging::Staged);
+        for f in &mut self.files {
+            f.staging = Staging::Unstaged;
+        }
+        // Un hash finto ma univoco fra i commit in memoria.
+        let hash = format!("c{:06}", self.commits.len());
+        let id = CommitId(hash.clone());
+        self.commits.insert(
+            0,
+            Commit {
+                id: id.clone(),
+                graph: "●  ".to_string(),
+                hash,
+                msg: message
+                    .trim()
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string(),
+                author: "Mario".to_string(),
+            },
+        );
+        self.commit_files.push((id.clone(), committed));
+        Ok(id)
+    }
 }
 
 #[cfg(test)]
@@ -306,7 +420,7 @@ mod tests {
         for c in repo.commits() {
             let files = repo.files_of_commit(&c.id).expect("commit noto");
             assert!(!files.is_empty(), "{} senza file", c.hash);
-            assert!(files.iter().all(|f| !f.staged));
+            assert!(files.iter().all(|f| f.staging == Staging::Unstaged));
         }
         assert!(repo
             .files_of_commit(&CommitId("does-not-exist".to_string()))
@@ -437,5 +551,42 @@ mod tests {
             );
         }
         assert_eq!(repo.branches().len(), n);
+    }
+
+    #[test]
+    fn stage_unstage_and_commit_follow_the_rules_of_the_real_backend() {
+        let mut repo = MockGitRepo::new();
+        let state = |repo: &MockGitRepo, path: &str| {
+            repo.files()
+                .into_iter()
+                .find(|f| f.path == path)
+                .map(|f| (f.status, f.staging))
+        };
+
+        repo.stage_file("notes.txt").unwrap();
+        assert_eq!(
+            state(&repo, "notes.txt"),
+            Some((FileStatus::Added, Staging::Staged))
+        );
+        repo.unstage_file("notes.txt").unwrap();
+        assert_eq!(
+            state(&repo, "notes.txt"),
+            Some((FileStatus::Untracked, Staging::Unstaged))
+        );
+        repo.stage_file("nope").unwrap();
+        repo.unstage_file("nope").unwrap();
+        assert_eq!(repo.files().len(), initial_files().len(), "nessun effetto");
+
+        assert!(repo.commit("  ").is_err());
+        let n = repo.commits().len();
+        let id = repo.commit("Commit main.rs").unwrap();
+        assert_eq!(repo.commits().len(), n + 1);
+        assert_eq!(repo.commits()[0].id, id);
+        assert!(state(&repo, "src/main.rs").is_none(), "committato");
+        assert_eq!(
+            repo.files_of_commit(&id).unwrap()[0].path,
+            "src/main.rs".to_string()
+        );
+        assert_eq!(repo.commit("Again"), Err(nothing_to_commit()));
     }
 }

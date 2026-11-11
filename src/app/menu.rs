@@ -7,7 +7,7 @@
 
 use crate::msg::{Cmd, Msg};
 
-use super::dialog_flow::ask_delete_branch;
+use super::dialog_flow::{ask_commit, ask_delete_branch};
 use super::dialogs;
 use super::model::{MenuState, Model, Overlay};
 
@@ -148,10 +148,10 @@ fn activate(model: &mut Model, label: &str, action: MenuAction) {
         MenuAction::About => model.overlays.push(Overlay::Dialog(dialogs::about())),
         MenuAction::NewBranch => model.overlays.push(Overlay::Dialog(dialogs::new_branch())),
         MenuAction::DeleteBranch => ask_delete_branch(model),
+        MenuAction::Commit => ask_commit(model),
         MenuAction::OpenRepository
         | MenuAction::CloneRepository
         | MenuAction::Checkout
-        | MenuAction::Commit
         | MenuAction::Amend
         | MenuAction::Stash
         | MenuAction::ZoomPanel

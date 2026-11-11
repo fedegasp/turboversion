@@ -9,12 +9,12 @@
 //! la riga delle modifiche non committate, i file del commit altrimenti.
 //! Qui si verifica anche ciò che serve perché segua *solo* la selezione: le
 //! risposte arrivate tardi si scartano, e `Space` non mette in stage i file
-//! di un commit.
+//! di un commit (lo stage della working copy sta in `staging.rs`).
 
 use super::*;
 use crate::app::model::{ChangesNotice, ChangesView, CommitLoad};
 use crate::effects;
-use crate::git::domain::{CommitId, FileEntry};
+use crate::git::domain::{CommitId, FileEntry, Staging};
 use crate::git::repo::{GitError, Repo};
 
 /// I percorsi della lista che Changes mostra, e se è la working copy.
@@ -267,48 +267,51 @@ fn a_second_result_for_the_same_commit_does_not_reset_its_cursor() {
     );
 }
 
+/// Lo stage di ciascun file della working copy, per confrontarlo prima e
+/// dopo un tasto.
+fn staging_of_working_copy(app: &TestApp) -> Vec<Staging> {
+    app.working_copy_files
+        .items()
+        .iter()
+        .map(|f| f.staging)
+        .collect()
+}
+
 #[test]
 fn space_is_ignored_on_the_files_of_a_commit() {
     let mut app = TestApp::new();
     app.focus = Panel::History;
     press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Down);
-    let staged_before: Vec<bool> = app
-        .working_copy_files
-        .items()
-        .iter()
-        .map(|f| f.staged)
-        .collect();
+    let staged_before = staging_of_working_copy(&app);
 
     app.focus = Panel::Changes;
-    press(&mut app, KeyCode::Char(' '));
+    let cmds = press_and_hold(&mut app, KeyCode::Char(' '));
+    assert!(cmds.is_empty(), "nessuna scrittura chiesta: {cmds:?}");
 
     let ChangesView::Commit(commit) = app.changes() else {
         panic!("Changes mostra un commit");
     };
     let files = commit.files().expect("i file del commit sono arrivati");
-    assert!(files.items().iter().all(|f| !f.staged));
-    let staged_after: Vec<bool> = app
-        .working_copy_files
-        .items()
-        .iter()
-        .map(|f| f.staged)
-        .collect();
+    assert!(files.items().iter().all(|f| f.staging == Staging::Unstaged));
     assert_eq!(
-        staged_after, staged_before,
+        staging_of_working_copy(&app),
+        staged_before,
         "nemmeno la working copy nascosta"
     );
 
-    // Sulla working copy lo stesso tasto commuta, come prima.
+    // Sulla working copy lo stesso tasto chiede la scrittura del file
+    // selezionato, e non cambia nulla finché non arriva l'esito.
     app.focus = Panel::History;
     press(&mut app, KeyCode::Up);
     press(&mut app, KeyCode::Up);
     app.focus = Panel::Changes;
-    press(&mut app, KeyCode::Char(' '));
-    assert_ne!(
-        app.working_copy_files.selected().map(|f| f.staged),
-        staged_before.first().copied()
+    let cmds = press_and_hold(&mut app, KeyCode::Char(' '));
+    assert!(
+        matches!(cmds.as_slice(), [Cmd::UnstageFile(p)] if p == "src/main.rs"),
+        "{cmds:?}"
     );
+    assert_eq!(staging_of_working_copy(&app), staged_before);
 }
 
 /// Un errore di lettura si mostra dentro il pannello, e solo se riguarda il
@@ -537,12 +540,7 @@ fn keys_on_a_changes_notice_change_nothing() {
     app.focus = Panel::History;
     let first = commit_id(&app, 0);
     press_and_hold(&mut app, KeyCode::Down);
-    let staged: Vec<bool> = app
-        .working_copy_files
-        .items()
-        .iter()
-        .map(|f| f.staged)
-        .collect();
+    let staged = staging_of_working_copy(&app);
 
     app.focus = Panel::Changes;
     for key in [KeyCode::Down, KeyCode::Char(' '), KeyCode::Up] {
@@ -553,12 +551,6 @@ fn keys_on_a_changes_notice_change_nothing() {
             ChangesView::Commit(c) if *c.id() == first && c.is_awaiting()
         ));
     }
-    let after: Vec<bool> = app
-        .working_copy_files
-        .items()
-        .iter()
-        .map(|f| f.staged)
-        .collect();
-    assert_eq!(after, staged);
+    assert_eq!(staging_of_working_copy(&app), staged);
     assert_eq!(app.history().selected_index(), Some(1));
 }

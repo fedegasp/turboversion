@@ -23,6 +23,7 @@ mod diff;
 mod diff_follow;
 mod overlays;
 mod panels;
+mod staging;
 mod worker_loss;
 
 /// Replica il ciclo di `run` (traduzione del tasto, `update`, eventuali
@@ -45,8 +46,12 @@ pub(super) struct TestApp {
 
 impl TestApp {
     pub(super) fn new() -> Self {
+        Self::with_repo(MockGitRepo::new())
+    }
+
+    /// Come `new`, su un backend di prova preparato dal test.
+    pub(super) fn with_repo(mut repo: MockGitRepo) -> Self {
         let mut model = Model::new();
-        let mut repo = MockGitRepo::new();
         run_to_completion(&mut model, &mut repo, init_cmds());
         Self { model, repo }
     }

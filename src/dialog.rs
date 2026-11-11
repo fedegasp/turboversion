@@ -12,6 +12,8 @@
 
 use crate::msg::Msg;
 
+/// Il limite di un campo di testo, salvo che il dialog ne chieda un altro
+/// (vedi `Dialog::with_max_input`): basta per un nome di ramo.
 const MAX_INPUT: usize = 64;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -30,6 +32,8 @@ pub(crate) enum Action {
     Info,
     NewBranch,
     DeleteBranch(String),
+    /// Il campo è il messaggio del commit da creare.
+    Commit,
 }
 
 pub(crate) struct Dialog {
@@ -40,6 +44,10 @@ pub(crate) struct Dialog {
     pub(crate) input: String,
     /// Indice del pulsante con il focus; 0 è sempre quello che accetta.
     pub(crate) button: usize,
+    /// Quanti caratteri accetta il campo di testo. Dipende da che cosa vi
+    /// si scrive: un nome di ramo è breve, la riga di un messaggio di
+    /// commit no.
+    max_input: usize,
 }
 
 impl Dialog {
@@ -51,7 +59,15 @@ impl Dialog {
             action,
             input: String::new(),
             button: 0,
+            max_input: MAX_INPUT,
         }
+    }
+
+    /// Lo stesso dialog, con un campo di testo che accetta fino a `max`
+    /// caratteri invece di quelli di default.
+    pub(crate) fn with_max_input(mut self, max: usize) -> Self {
+        self.max_input = max;
+        self
     }
 
     pub(crate) fn info(title: impl Into<String>, text: impl Into<String>) -> Self {
@@ -120,7 +136,7 @@ impl Dialog {
             // molte piattaforme come Ctrl+Alt) che deve restare testo digitabile.
             Msg::Char { c, is_plain_ctrl } if !is_plain_ctrl => match self.kind {
                 Kind::Input => {
-                    if !c.is_control() && self.input.chars().count() < MAX_INPUT {
+                    if !c.is_control() && self.input.chars().count() < self.max_input {
                         self.input.push(c);
                     }
                 }
@@ -205,5 +221,11 @@ mod tests {
             d.on_msg(char_msg('a'));
         }
         assert_eq!(d.input.chars().count(), MAX_INPUT);
+
+        let mut d = Dialog::input("t", "Message:", Action::Commit).with_max_input(MAX_INPUT * 3);
+        for _ in 0..(MAX_INPUT * 4) {
+            d.on_msg(char_msg('a'));
+        }
+        assert_eq!(d.input.chars().count(), MAX_INPUT * 3, "limite del dialog");
     }
 }

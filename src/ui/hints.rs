@@ -27,7 +27,7 @@
 
 use std::borrow::Cow;
 
-use crate::app::{Model, Panel};
+use crate::app::{Model, Panel, StageToggle};
 
 /// Le scorciatoie da mostrare nella barra di stato.
 pub(crate) type Hints = Cow<'static, [(&'static str, &'static str)]>;
@@ -54,18 +54,23 @@ const MENU_KEYS: &[(&str, &str)] = &[
 /// stretto, cioè proprio dove serve di più.
 const GIT_UNAVAILABLE: (&str, &str) = ("!", "Git unavailable");
 
-/// Scorciatoie del pannello principale; `Space Stage` compare solo quando
-/// il focus è sul pannello Changes e questo mostra la working copy, l'unico
-/// caso in cui quel tasto ha effetto: sui file di un commit non c'è niente
-/// da mettere in stage.
+/// Scorciatoie del pannello principale; `Space` compare solo quando il
+/// focus è sul pannello Changes e questo mostra un file della working copy,
+/// l'unico caso in cui quel tasto ha effetto: sui file di un commit non c'è
+/// niente da mettere in stage. Dice che cosa farà sul file selezionato,
+/// `Stage` o `Unstage`, con la stessa decisione che lo esegue.
 fn main_hints(model: &Model) -> Vec<(&'static str, &'static str)> {
     let mut hints = Vec::new();
     if !model.git_available() {
         hints.push(GIT_UNAVAILABLE);
     }
     hints.extend([("Tab", "Panel"), ("↑↓", "Move")]);
-    if model.focus == Panel::Changes && model.changes().is_working_copy() {
-        hints.push(("Space", "Stage"));
+    if model.focus == Panel::Changes {
+        match model.stage_toggle() {
+            Some((StageToggle::Stage, _)) => hints.push(("Space", "Stage")),
+            Some((StageToggle::Unstage, _)) => hints.push(("Space", "Unstage")),
+            None => {}
+        }
     }
     hints.push(("F10", "Menu"));
     hints.push(("Alt-X", "Quit"));
@@ -88,7 +93,26 @@ mod tests {
     use crate::app::{model_for_tests, model_without_changes_for_tests};
 
     fn offers_stage(model: &Model) -> bool {
-        active(model).iter().any(|&(key, _)| key == "Space")
+        space_hint(model).is_some()
+    }
+
+    fn space_hint(model: &Model) -> Option<&'static str> {
+        active(model)
+            .iter()
+            .find(|&&(key, _)| key == "Space")
+            .map(|&(_, label)| label)
+    }
+
+    /// Il testo segue il file selezionato: `Unstage` su un file tutto in
+    /// stage, `Stage` altrimenti. Nei dati di prova il primo file è in
+    /// stage e il secondo no.
+    #[test]
+    fn the_space_hint_says_what_the_key_will_do_on_the_selected_file() {
+        let mut model = model_for_tests();
+        model.focus = Panel::Changes;
+        assert_eq!(space_hint(&model), Some("Unstage"));
+        model.working_copy_files.select(1);
+        assert_eq!(space_hint(&model), Some("Stage"));
     }
 
     /// `Space Stage` compare su Changes solo quando Changes mostra la

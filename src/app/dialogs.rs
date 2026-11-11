@@ -23,6 +23,10 @@ use crate::git::repo::GitError;
 /// cancellazione riuscita non apre alcun dialog, aggiorna la lista.
 const DELETE_BRANCH: &str = "Delete branch";
 
+/// Titolo dei dialog del commit, riuscito il quale non se ne apre alcuno:
+/// la riga nuova in History lo dice già.
+const COMMIT: &str = "Commit";
+
 pub(super) fn about() -> Dialog {
     Dialog::info("About", "TurboVersion\nTurbo Vision meets version control.")
 }
@@ -103,6 +107,55 @@ pub(super) fn delete_branch_refused_current(name: &str) -> Dialog {
 
 pub(super) fn delete_branch_failed(error: &GitError) -> Dialog {
     Dialog::info(DELETE_BRANCH, error.to_string())
+}
+
+/// Uno stage non riuscito. Uno riuscito non apre alcun dialog: la casella
+/// del file cambia.
+pub(super) fn stage_failed(error: &GitError) -> Dialog {
+    Dialog::info("Stage", error.to_string())
+}
+
+pub(super) fn unstage_failed(error: &GitError) -> Dialog {
+    Dialog::info("Unstage", error.to_string())
+}
+
+/// Quanti caratteri accetta il messaggio di commit: una riga sola, ma
+/// abbastanza lunga per un titolo descrittivo. Un corpo su più righe non
+/// si può ancora scrivere da qui.
+const COMMIT_MESSAGE_MAX: usize = 200;
+
+pub(super) fn commit() -> Dialog {
+    Dialog::input(COMMIT, "Commit message:", Action::Commit).with_max_input(COMMIT_MESSAGE_MAX)
+}
+
+/// Lo stesso dialog di `commit`, riaperto con l'errore in calce al prompt
+/// e il messaggio già digitato ancora nel campo, come `new_branch_retry`.
+/// Solo per un errore che riguarda il messaggio: correggerlo lì ha senso.
+pub(super) fn commit_retry(typed: String, error: &GitError) -> Dialog {
+    let mut d = Dialog::input(COMMIT, format!("Commit message:\n{error}"), Action::Commit)
+        .with_max_input(COMMIT_MESSAGE_MAX);
+    d.input = typed;
+    d
+}
+
+/// Un commit fallito per una ragione che il messaggio non può correggere
+/// (nulla in stage, un merge in corso, l'identità di git non configurata):
+/// riaprire il campo inviterebbe a riprovare uguale.
+pub(super) fn commit_failed(error: &GitError) -> Dialog {
+    Dialog::info(COMMIT, error.to_string())
+}
+
+/// Il commit chiesto senza nulla in stage: lo si dice subito, invece di
+/// far digitare un messaggio per un commit che non si può fare. Il testo è
+/// quello con cui lo rifiuterebbe il backend.
+pub(super) fn nothing_to_commit() -> Dialog {
+    Dialog::info(
+        COMMIT,
+        format!(
+            "{}\nSelect a file in Changes and press Space to stage it.",
+            crate::git::validate::nothing_to_commit()
+        ),
+    )
 }
 
 #[cfg(test)]

@@ -55,10 +55,11 @@ mod tests {
     fn space_stage_hint_only_shows_when_changes_panel_is_focused() {
         let mut model = model_for_tests();
         model.focus = Panel::History;
-        assert!(!crate::ui::render(80, 24, &mut model).contains("Stage"));
+        assert!(!crate::ui::render(80, 24, &mut model).contains("Space"));
 
+        // Il primo file dei dati di prova è in stage: il tasto lo toglie.
         model.focus = Panel::Changes;
-        assert!(crate::ui::render(80, 24, &mut model).contains("Stage"));
+        assert!(crate::ui::render(80, 24, &mut model).contains("Unstage"));
     }
 
     #[test]
