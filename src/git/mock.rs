@@ -16,7 +16,9 @@
 //! case-insensitive, o un ramo `a/b` quando esiste già `a`. Sul backend
 //! reale sono errori, qui no.
 
-use super::domain::{Branch, BranchKind, Commit, CommitId, FileEntry, FileStatus};
+use super::domain::{
+    Branch, BranchKind, Commit, CommitId, DiffSource, DiffTarget, FileDiff, FileEntry, FileStatus,
+};
 use super::repo::{GitError, Repo};
 use super::validate::{branch_not_found, current_branch_not_deletable, validate_branch_name};
 
@@ -123,7 +125,9 @@ fn initial_commit_files() -> Vec<(CommitId, Vec<FileEntry>)> {
         .collect()
 }
 
-fn initial_diff() -> Vec<String> {
+/// Il diff di `src/theme.rs` nella working copy: l'unico scritto a mano,
+/// perché è quello che si vede appena aperta l'app sui dati di prova.
+fn theme_diff() -> Vec<String> {
     [
         "diff --git a/src/theme.rs b/src/theme.rs",
         "@@ -1,6 +1,9 @@",
@@ -147,6 +151,36 @@ fn initial_diff() -> Vec<String> {
     .collect()
 }
 
+/// Un diff plausibile per `file`, con il nome di `context` nelle righe:
+/// così un test riconosce non solo di quale file è il diff mostrato, ma
+/// anche se viene dalla working copy o da quale commit.
+fn synthetic_diff(file: &FileEntry, context: &str) -> Vec<String> {
+    let path = &file.path;
+    let mut lines = vec![format!("diff --git a/{path} b/{path}")];
+    let body = match file.status {
+        FileStatus::Added | FileStatus::Untracked => {
+            vec![
+                "@@ -0,0 +1,2 @@".to_string(),
+                format!("+{path} ({context})"),
+                "+".to_string(),
+            ]
+        }
+        FileStatus::Deleted => vec![
+            "@@ -1,2 +0,0 @@".to_string(),
+            format!("-{path} ({context})"),
+            "-".to_string(),
+        ],
+        FileStatus::Modified => vec![
+            "@@ -1,2 +1,2 @@".to_string(),
+            format!(" {path}"),
+            format!("-old ({context})"),
+            format!("+new ({context})"),
+        ],
+    };
+    lines.extend(body);
+    lines
+}
+
 /// Backend git "finto": tiene i dati in memoria, per sviluppare la TUI senza
 /// dipendere da un repository reale (vedi roadmap in README.md).
 pub(crate) struct MockGitRepo {
@@ -154,7 +188,6 @@ pub(crate) struct MockGitRepo {
     commits: Vec<Commit>,
     commit_files: Vec<(CommitId, Vec<FileEntry>)>,
     files: Vec<FileEntry>,
-    diff: Vec<String>,
 }
 
 impl MockGitRepo {
@@ -164,7 +197,6 @@ impl MockGitRepo {
             commits: initial_commits(),
             commit_files: initial_commit_files(),
             files: initial_files(),
-            diff: initial_diff(),
         }
     }
 }
@@ -201,8 +233,34 @@ impl Repo for MockGitRepo {
             })
     }
 
-    fn diff(&self) -> Vec<String> {
-        self.diff.clone()
+    /// Un file che non compare fra quelli del contesto non ha differenze,
+    /// come per il backend reale; un commit sconosciuto è un errore.
+    fn file_diff(&self, target: &DiffTarget) -> Result<FileDiff, GitError> {
+        let (files, context) = match &target.source {
+            DiffSource::WorkingCopy => (self.files.as_slice(), "working copy".to_string()),
+            DiffSource::Commit(id) => {
+                let files = self
+                    .commit_files
+                    .iter()
+                    .find(|(c, _)| c == id)
+                    .map(|(_, files)| files.as_slice())
+                    .ok_or_else(|| {
+                        GitError(format!(
+                            "Cannot read the diff of {}: commit {} not found",
+                            target.path,
+                            id.as_str()
+                        ))
+                    })?;
+                (files, id.as_str().to_string())
+            }
+        };
+        let Some(file) = files.iter().find(|f| f.path == target.path) else {
+            return Ok(FileDiff::NoTextChanges);
+        };
+        if target.source == DiffSource::WorkingCopy && file.path == "src/theme.rs" {
+            return Ok(FileDiff::Text(theme_diff()));
+        }
+        Ok(FileDiff::Text(synthetic_diff(file, &context)))
     }
 
     fn create_branch(&mut self, name: &str) -> Result<Branch, GitError> {
@@ -252,6 +310,42 @@ mod tests {
         }
         assert!(repo
             .files_of_commit(&CommitId("does-not-exist".to_string()))
+            .is_err());
+    }
+
+    /// Ogni file elencato ha un diff, diverso per contesto: la working copy
+    /// e ciascun commit danno righe diverse anche per lo stesso percorso.
+    #[test]
+    fn every_listed_file_has_a_diff_of_its_own_context() {
+        let repo = MockGitRepo::new();
+        let text = |source: DiffSource, path: &str| match repo.file_diff(&DiffTarget {
+            source,
+            path: path.to_string(),
+        }) {
+            Ok(FileDiff::Text(lines)) => lines,
+            other => panic!("{path}: atteso un diff testuale, non {other:?}"),
+        };
+        for f in repo.files() {
+            assert!(!text(DiffSource::WorkingCopy, &f.path).is_empty());
+        }
+        for c in repo.commits() {
+            for f in repo.files_of_commit(&c.id).expect("commit noto") {
+                let lines = text(DiffSource::Commit(c.id.clone()), &f.path);
+                assert!(lines.join("\n").contains(&c.hash), "{lines:?}");
+            }
+        }
+        assert_eq!(
+            repo.file_diff(&DiffTarget {
+                source: DiffSource::WorkingCopy,
+                path: "not/changed.rs".to_string(),
+            }),
+            Ok(FileDiff::NoTextChanges)
+        );
+        assert!(repo
+            .file_diff(&DiffTarget {
+                source: DiffSource::Commit(CommitId("does-not-exist".to_string())),
+                path: "x".to_string(),
+            })
             .is_err());
     }
 

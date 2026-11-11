@@ -25,8 +25,7 @@ fn diff_scroll_resets_when_history_selection_changes() {
 fn app_showing_diff(lines: usize, viewport: u16) -> TestApp {
     let mut app = TestApp::new();
     app.focus = Panel::Diff;
-    app.diff = (0..lines).map(|i| format!("line {i}")).collect();
-    app.diff_scroll = 0;
+    app.show_diff_for_tests((0..lines).map(|i| format!("line {i}")).collect());
     app.send(Msg::DiffViewport(viewport));
     app
 }

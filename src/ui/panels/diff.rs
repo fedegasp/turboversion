@@ -5,12 +5,31 @@
 // 2026-11-03 Federico Gasperini
 //
 
-//! Pannello "Diff": contenuto del diff del commit/file selezionato.
+//! Pannello "Diff": il diff del file selezionato in Changes, nel contesto
+//! di Changes (working copy o commit). Quando non ci sono righe da
+//! mostrare il pannello dice perché, con una riga di testo: un pannello
+//! vuoto non distinguerebbe un diff in arrivo da un binario, da un errore o
+//! dall'assenza di un file selezionato.
 
 use ratatui::{layout::Rect, text::Line, widgets::Paragraph, Frame};
 
+use crate::app::DiffNotice;
 use crate::ui::text::expand_tabs;
 use crate::ui::theme;
+
+/// Perché il pannello Diff non ha righe da scorrere.
+pub(crate) fn render_notice(f: &mut Frame, notice: DiffNotice<'_>, area: Rect) {
+    let text = match notice {
+        DiffNotice::NoFile => "No file selected",
+        DiffNotice::Loading => "Loading...",
+        DiffNotice::FilesNotRead => "No diff: the files of this commit could not be read",
+        DiffNotice::Binary => "Binary file: no text to show",
+        DiffNotice::NoTextChanges => "No text changes to show",
+        DiffNotice::Failed(message) => message,
+        DiffNotice::GitUnavailable => "Git unavailable: diff not loaded",
+    };
+    super::render_notice_text(f, text, area);
+}
 
 pub(crate) fn render(f: &mut Frame, diff: &[String], area: Rect, scroll: u16) {
     let lines: Vec<Line> = diff
@@ -53,9 +72,11 @@ mod tests {
     fn model_with_wide_lines(lines: usize) -> Model {
         let mut model = model_for_tests();
         model.focus = Panel::Diff;
-        model.diff = (0..lines)
-            .map(|i| format!("line {i} {}", "x".repeat(200)))
-            .collect();
+        model.show_diff_for_tests(
+            (0..lines)
+                .map(|i| format!("line {i} {}", "x".repeat(200)))
+                .collect(),
+        );
         model
     }
 
@@ -103,5 +124,111 @@ mod tests {
             out.contains("line 9 "),
             "le dieci righe ci stanno tutte nel pannello: {out}"
         );
+    }
+
+    /// Il testo del pannello Diff, a terminale stretto con il focus lì: il
+    /// pannello prende tutto il corpo e nient'altro finisce nel testo.
+    fn diff_panel_text(model: &mut Model) -> String {
+        model.focus = Panel::Diff;
+        render(60, 12, model)
+    }
+
+    /// Ogni caso senza righe da scorrere ha il suo testo, e tutti sono fatti
+    /// di caratteri a larghezza certa.
+    #[test]
+    fn the_diff_panel_says_why_it_has_no_lines() {
+        use crate::git::domain::{DiffSource, DiffTarget, FileDiff};
+        use crate::git::repo::GitError;
+        use crate::msg::Msg;
+
+        // Il secondo file della working copy, chiesto e non ancora arrivato.
+        let pending = || {
+            let mut model = model_for_tests();
+            model.focus = Panel::Changes;
+            let cmds = crate::app::update(&mut model, Msg::Down);
+            assert_eq!(cmds.len(), 1, "il diff è stato chiesto");
+            let target = DiffTarget {
+                source: DiffSource::WorkingCopy,
+                path: model.working_copy_files.items()[1].path.clone(),
+            };
+            (model, target)
+        };
+        let arrive = |model: &mut Model, target, result| {
+            crate::app::update(model, Msg::FileDiffLoaded { target, result });
+        };
+
+        let (mut model, _) = pending();
+        assert!(diff_panel_text(&mut model).contains("Loading..."));
+
+        let cases = [
+            (Ok(FileDiff::Binary), "Binary file: no text to show"),
+            (Ok(FileDiff::NoTextChanges), "No text changes to show"),
+            (
+                Err(GitError("Cannot read: broken".into())),
+                "Cannot read: broken",
+            ),
+        ];
+        for (result, text) in cases {
+            let (mut model, target) = pending();
+            arrive(&mut model, target, result);
+            let out = diff_panel_text(&mut model);
+            assert!(out.contains(text), "{out}");
+            assert!(text.is_ascii());
+        }
+
+        let (mut model, _) = pending();
+        crate::app::update(&mut model, Msg::WorkerLost);
+        crate::app::update(&mut model, Msg::Enter);
+        // Il marcatore della barra di stato dice "Git unavailable" anche lui:
+        // si cerca il testo che solo il pannello scrive.
+        assert!(diff_panel_text(&mut model).contains("diff not loaded"));
+
+        let mut model = model_for_tests();
+        crate::app::update(
+            &mut model,
+            Msg::Loaded {
+                branches: Vec::new(),
+                commits: Vec::new(),
+                files: Vec::new(),
+            },
+        );
+        assert!(diff_panel_text(&mut model).contains("No file selected"));
+
+        // I file di un commit illeggibili: il Diff non dice "nessun file
+        // selezionato", né ripete l'errore che Changes già mostra.
+        let mut model = crate::app::model_without_changes_for_tests();
+        crate::app::update(&mut model, Msg::Down);
+        let id = match model.history().selected() {
+            Some(crate::app::HistoryEntry::Commit(c)) => c.id.clone(),
+            _ => panic!("History è su un commit"),
+        };
+        crate::app::update(
+            &mut model,
+            Msg::CommitFilesLoaded {
+                id,
+                result: Err(GitError("Cannot read: broken".into())),
+            },
+        );
+        let out = diff_panel_text(&mut model);
+        assert!(out.contains("could not be read"), "{out}");
+        assert!(!out.contains("broken") && !out.contains("No file selected"));
+    }
+
+    /// Il diff a schermo è quello del file selezionato, non dell'intero
+    /// repository: gli altri file della working copy non compaiono.
+    #[test]
+    fn the_diff_panel_shows_only_the_selected_file() {
+        let mut model = model_for_tests();
+        let files: Vec<String> = model
+            .working_copy_files
+            .items()
+            .iter()
+            .map(|f| f.path.clone())
+            .collect();
+        let out = diff_panel_text(&mut model);
+        assert!(out.contains(&format!("a/{}", files[0])), "{out}");
+        for other in &files[1..] {
+            assert!(!out.contains(other.as_str()), "{other} in {out}");
+        }
     }
 }

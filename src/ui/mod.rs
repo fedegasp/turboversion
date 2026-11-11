@@ -151,6 +151,7 @@ fn draw_panel(f: &mut Frame, model: &mut Model, panel: Panel, area: Rect) {
         // Il limite dello scorrimento (`viewport`) serve solo a `update`:
         // al renderer basta sapere da quale riga partire.
         PanelContent::Diff { lines, scroll, .. } => panels::diff::render(f, lines, inner, *scroll),
+        PanelContent::DiffNotice(notice) => panels::diff::render_notice(f, notice, inner),
     }
 }
 
@@ -207,9 +208,9 @@ mod tests {
     }
 
     /// Lo stato che il `Model` tiene, nella forma che un frame potrebbe
-    /// alterare: righe delle liste, cursori, scorrimento del diff, focus e
-    /// overlay aperti.
-    fn model_snapshot(model: &Model) -> Vec<usize> {
+    /// alterare: righe delle liste, cursori, scorrimento del diff, focus,
+    /// overlay aperti e la lettura del diff.
+    fn model_snapshot(model: &Model) -> (Vec<usize>, String) {
         let lists = [
             (
                 model.local_branches.len(),
@@ -230,10 +231,30 @@ mod tests {
             .flat_map(|(len, sel)| [*len, sel.unwrap_or(usize::MAX)])
             .collect();
         out.push(usize::from(model.diff_scroll));
-        out.push(model.diff.len());
         out.push(model.focus as usize);
         out.push(model.overlays.len());
-        out
+        (out, diff_snapshot(model))
+    }
+
+    /// La lettura del diff a schermo: la chiave (file e contesto) e il suo
+    /// stato, con il numero di righe se è arrivato un testo. Una riga in più
+    /// o in meno, o un cambio di stato, cambiano l'impronta.
+    fn diff_snapshot(model: &Model) -> String {
+        use crate::app::Load;
+        use crate::git::domain::FileDiff;
+
+        let Some(view) = model.diff() else {
+            return "no diff".to_string();
+        };
+        let state = match view.load() {
+            Load::Awaiting => "awaiting".to_string(),
+            Load::Loaded(FileDiff::Text(lines)) => format!("text, {} lines", lines.len()),
+            Load::Loaded(FileDiff::Binary) => "binary".to_string(),
+            Load::Loaded(FileDiff::NoTextChanges) => "no text changes".to_string(),
+            Load::Failed(message) => format!("failed: {message}"),
+            Load::Unavailable => "unavailable".to_string(),
+        };
+        format!("{:?}: {state}", view.key())
     }
 
     /// Disegnare non cambia il `Model`. Il compilatore già lo impone per le
@@ -254,6 +275,7 @@ mod tests {
         // dello scorrimento: da qui in poi non c'è più nulla da assestare.
         render(100, 30, &mut model);
         let before = model_snapshot(&model);
+        assert!(before.1.contains("lines"), "un diff testuale: {}", before.1);
 
         render(100, 30, &mut model);
         assert_eq!(model_snapshot(&model), before);
@@ -424,7 +446,6 @@ mod tests {
                     branches: Vec::new(),
                     commits,
                     files: Vec::new(),
-                    diff: Vec::new(),
                 },
             );
             assert_eq!(cmds.len(), 1, "i file del commit sono stati chiesti");

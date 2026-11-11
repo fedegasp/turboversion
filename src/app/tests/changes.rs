@@ -24,9 +24,10 @@ fn shown(app: &mut TestApp) -> (bool, Vec<String>) {
         PanelContent::WorkingCopyFiles(list) => (true, paths(list.items())),
         PanelContent::CommitFiles(list) => (false, paths(list.items())),
         PanelContent::ChangesNotice(notice) => panic!("Changes non ha una lista: {notice:?}"),
-        PanelContent::Branches(_) | PanelContent::History(_) | PanelContent::Diff { .. } => {
-            panic!("Changes mostra sempre una lista di file")
-        }
+        PanelContent::Branches(_)
+        | PanelContent::History(_)
+        | PanelContent::Diff { .. }
+        | PanelContent::DiffNotice(_) => panic!("Changes mostra sempre una lista di file"),
     }
 }
 
@@ -42,7 +43,8 @@ fn notice(app: &mut TestApp) -> Option<String> {
         | PanelContent::CommitFiles(_)
         | PanelContent::Branches(_)
         | PanelContent::History(_)
-        | PanelContent::Diff { .. } => None,
+        | PanelContent::Diff { .. }
+        | PanelContent::DiffNotice(_) => None,
     }
 }
 
@@ -79,6 +81,16 @@ fn press_and_hold(app: &mut TestApp, code: KeyCode) -> Vec<Cmd> {
 
 fn is_load_of(cmds: &[Cmd], id: &CommitId) -> bool {
     matches!(cmds, [Cmd::LoadCommitFiles(asked)] if asked == id)
+}
+
+/// I commit di cui `cmds` chiede i file, ignorando le letture dei diff.
+fn commit_reads(cmds: &[Cmd]) -> Vec<&CommitId> {
+    cmds.iter()
+        .filter_map(|c| match c {
+            Cmd::LoadCommitFiles(id) => Some(id),
+            _ => None,
+        })
+        .collect()
 }
 
 #[test]
@@ -124,9 +136,9 @@ fn going_back_to_the_working_copy_keeps_its_cursor() {
     assert_eq!(app.working_copy_files.selected_index(), Some(2));
 }
 
-/// I file di un commit si chiedono una volta per ogni commit su cui la
-/// selezione arriva, e non si chiedono affatto per la working copy, che è
-/// già nel `Model`, né quando la selezione non si muove.
+/// I file di un commit si chiedono quando la selezione arriva su un commit,
+/// e non si chiedono per la working copy, che è già nel `Model`, né quando
+/// la selezione non si muove.
 #[test]
 fn files_are_asked_for_only_when_the_selection_reaches_a_new_commit() {
     let mut app = TestApp::new();
@@ -138,11 +150,11 @@ fn files_are_asked_for_only_when_the_selection_reaches_a_new_commit() {
         matches!(app.changes(), ChangesView::Commit(c) if c.is_awaiting() && c.files().is_none()),
         "in attesa, e senza i file della working copy sotto l'identità del commit"
     );
+    app.run(cmds);
 
-    assert!(
-        press_and_hold(&mut app, KeyCode::Up).is_empty(),
-        "working copy"
-    );
+    let cmds = press_and_hold(&mut app, KeyCode::Up);
+    assert!(commit_reads(&cmds).is_empty(), "working copy: {cmds:?}");
+    app.run(cmds);
 
     let last = app.history().len();
     for _ in 0..last {
@@ -154,9 +166,35 @@ fn files_are_asked_for_only_when_the_selection_reaches_a_new_commit() {
     );
 }
 
-/// Scorrendo in fretta gli esiti arrivano quando la selezione è già
-/// altrove: quello del commit selezionato si applica, gli altri si
-/// scartano, qualunque sia l'ordine in cui arrivano.
+/// Scorrendo in fretta, finché i file del primo commit raggiunto non
+/// tornano non si chiede altro: le righe attraversate nel frattempo non si
+/// leggono affatto. Al ritorno di quella lettura, obsoleta e quindi
+/// scartata, parte quella del commit su cui la selezione si è fermata.
+#[test]
+fn scrolling_through_history_reads_only_where_the_selection_stops() {
+    let mut app = TestApp::new();
+    app.focus = Panel::History;
+    let mut asked = Vec::new();
+    for _ in 0..4 {
+        asked.extend(press_and_hold(&mut app, KeyCode::Down));
+    }
+    let (first, fourth) = (commit_id(&app, 0), commit_id(&app, 3));
+    assert!(is_load_of(&asked, &first), "una sola lettura: {asked:?}");
+
+    let msg = effects::run(Cmd::LoadCommitFiles(first), &mut app.repo);
+    let next = update(&mut app.model, msg);
+    assert!(is_load_of(&next, &fourth), "{next:?}");
+    assert!(
+        matches!(app.changes(), ChangesView::Commit(c) if *c.id() == fourth && c.is_awaiting()),
+        "l'esito del primo commit è obsoleto e non si mostra"
+    );
+
+    app.run(next);
+    assert_eq!(shown(&mut app), (false, paths_of_commit(&app, &fourth)));
+}
+
+/// Gli esiti che arrivano quando la selezione è già altrove si scartano:
+/// quello del commit selezionato si applica, gli altri no, anche dopo.
 #[test]
 fn a_late_result_for_a_commit_no_longer_selected_is_discarded() {
     let mut app = TestApp::new();
@@ -166,18 +204,20 @@ fn a_late_result_for_a_commit_no_longer_selected_is_discarded() {
     let asked_first = press_and_hold(&mut app, KeyCode::Down);
     let asked_second = press_and_hold(&mut app, KeyCode::Down);
     assert!(is_load_of(&asked_first, &first));
-    assert!(is_load_of(&asked_second, &second));
+    assert!(asked_second.is_empty(), "fusa: la prima è ancora in volo");
 
     // Il caso che conta: l'esito vecchio arriva mentre si aspetta ancora
     // quello giusto. Applicarlo mostrerebbe i file del primo commit sotto
-    // l'identità del secondo.
-    app.run(asked_first);
+    // l'identità del secondo. Il suo ritorno fa partire la lettura giusta.
+    let msg = files_loaded(&app, &first);
+    let next = update(&mut app.model, msg);
     assert!(
         matches!(app.changes(), ChangesView::Commit(c) if c.is_awaiting() && c.files().is_none()),
         "l'esito del primo commit è arrivato tardi"
     );
+    assert!(is_load_of(&next, &second), "{next:?}");
 
-    app.run(asked_second);
+    app.run(next);
     assert_eq!(shown(&mut app), (false, paths_of_commit(&app, &second)));
 
     // E dopo quello giusto non lo sostituisce.
@@ -193,9 +233,9 @@ fn a_late_result_for_a_commit_no_longer_selected_is_discarded() {
     assert_eq!(shown(&mut app), (true, paths_of_working_copy(&app)));
 }
 
-/// Due richieste per lo stesso commit (A, poi B, poi di nuovo A): la prima
-/// che arriva mostra i file, la seconda è un doppione e non deve riportare
-/// in cima il cursore che l'utente ha già mosso.
+/// Andata e ritorno mentre la lettura di A è in volo (A, B, di nuovo A): non
+/// si chiede A una seconda volta, basta aspettare quella già partita. Un
+/// doppione arrivato dopo non riporta in cima il cursore.
 #[test]
 fn a_second_result_for_the_same_commit_does_not_reset_its_cursor() {
     let mut app = TestApp::new();
@@ -205,7 +245,11 @@ fn a_second_result_for_the_same_commit_does_not_reset_its_cursor() {
     let a1 = press_and_hold(&mut app, KeyCode::Down);
     let b = press_and_hold(&mut app, KeyCode::Down);
     let a2 = press_and_hold(&mut app, KeyCode::Up);
-    assert!(is_load_of(&a2, &first), "A di nuovo: la vista era su B");
+    assert!(is_load_of(&a1, &first));
+    assert!(
+        b.is_empty() && a2.is_empty(),
+        "A è già in volo: {b:?} {a2:?}"
+    );
 
     app.run(a1);
     assert_eq!(shown(&mut app), (false, paths_of_commit(&app, &first)));
@@ -221,10 +265,6 @@ fn a_second_result_for_the_same_commit_does_not_reset_its_cursor() {
         !shown(&mut app).1.is_empty(),
         "il doppione non ha sostituito la lista"
     );
-
-    app.run(b);
-    app.run(a2);
-    assert_eq!(shown(&mut app), (false, paths_of_commit(&app, &first)));
 }
 
 #[test]
@@ -347,17 +387,23 @@ fn going_back_to_the_last_loaded_commit_does_not_read_it_again() {
     assert_eq!(*commit.id(), second);
     assert_eq!(commit.files().and_then(|f| f.selected_index()), Some(1));
 
-    // Anche passando per una riga che non è un commit: dal primo commit
-    // alla working copy e ritorno. La vista conservata è una sola, quella
-    // dell'ultimo commit lasciato.
+    // Anche passando per una riga che non è un commit, e per un altro
+    // commit: dalla working copy si riscende sul primo e poi sul secondo,
+    // e nessuno dei due si rilegge. Le viste conservate sono più d'una.
     press(&mut app, KeyCode::Up);
     press(&mut app, KeyCode::Up);
     assert!(app.changes().is_working_copy());
-    assert!(press_and_hold(&mut app, KeyCode::Down).is_empty());
-    assert!(
-        is_load_of(&press_and_hold(&mut app, KeyCode::Down), &second),
-        "il secondo commit non è più conservato: si rilegge"
-    );
+    app.run(Vec::new());
+    for _ in 0..2 {
+        let cmds = press_and_hold(&mut app, KeyCode::Down);
+        assert!(commit_reads(&cmds).is_empty(), "già letto: {cmds:?}");
+        app.run(cmds);
+    }
+    let ChangesView::Commit(commit) = app.changes() else {
+        panic!("Changes mostra il commit");
+    };
+    assert_eq!(*commit.id(), second);
+    assert_eq!(commit.files().and_then(|f| f.selected_index()), Some(1));
 }
 
 /// La perdita del worker mentre i file di un commit sono in arrivo chiude
@@ -450,7 +496,6 @@ fn a_reload_that_moves_the_selection_onto_a_commit_asks_for_its_files() {
             branches: Vec::new(),
             commits,
             files: Vec::new(),
-            diff: Vec::new(),
         },
     );
     let first = commit_id(&app, 0);

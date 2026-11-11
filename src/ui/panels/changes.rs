@@ -18,7 +18,7 @@ use ratatui::{
     layout::Rect,
     style::Style,
     text::{Line, Span},
-    widgets::{ListItem, ListState, Paragraph, Wrap},
+    widgets::{ListItem, ListState},
     Frame,
 };
 
@@ -63,7 +63,7 @@ pub(crate) fn render_commit(
 ) {
     if files.is_empty() {
         // Un commit può non toccare alcun file (`--allow-empty`).
-        render_text(f, NO_FILES, area);
+        super::render_notice_text(f, NO_FILES, area);
         return;
     }
     let path_w = (area.width as usize).saturating_sub(STATUS_W);
@@ -76,28 +76,14 @@ pub(crate) fn render_commit(
 
 const NO_FILES: &str = "No files changed";
 
-/// Perché, su un commit, non c'è una lista da mostrare. I tre punti sono
-/// ASCII, come nel resto della UI ("New branch..."): l'ellissi Unicode è
-/// "East Asian ambiguous" e su alcuni terminali occupa due celle.
+/// Perché, su un commit, non c'è una lista da mostrare.
 pub(crate) fn render_notice(f: &mut Frame, notice: ChangesNotice<'_>, area: Rect) {
     let text = match notice {
         ChangesNotice::Loading => "Loading...",
         ChangesNotice::Failed(message) => message,
         ChangesNotice::GitUnavailable => "Git unavailable: files not loaded",
     };
-    render_text(f, text, area);
-}
-
-/// Una riga di testo al posto della lista, con lo stile delle finestre. Va
-/// a capo: un messaggio d'errore del backend può essere più largo del
-/// pannello, e troncato non si leggerebbe.
-fn render_text(f: &mut Frame, text: &str, area: Rect) {
-    f.render_widget(
-        Paragraph::new(text)
-            .style(theme::window().fg(theme::DIM))
-            .wrap(Wrap { trim: true }),
-        area,
-    );
+    super::render_notice_text(f, text, area);
 }
 
 fn status_and_path(e: &FileEntry, path_w: usize) -> [Span<'static>; 2] {

@@ -75,3 +75,44 @@ pub(crate) struct FileEntry {
     pub(crate) status: FileStatus,
     pub(crate) staged: bool,
 }
+
+/// Rispetto a che cosa si guarda il diff di un file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DiffSource {
+    /// Le modifiche non committate: dall'ultimo commit (HEAD) alla working
+    /// copy, comprese quelle già nell'indice.
+    WorkingCopy,
+    /// Ciò che il commit ha cambiato rispetto al suo primo parent, o
+    /// rispetto all'albero vuoto se non ha parent: lo stesso confronto con
+    /// cui `Repo::files_of_commit` elenca i suoi file.
+    Commit(CommitId),
+}
+
+/// Il diff di un file preciso, in un contesto preciso. È anche l'identità
+/// di una lettura: un esito arrivato per un altro file, o per lo stesso
+/// file in un altro contesto, non è quello da mostrare.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DiffTarget {
+    pub(crate) source: DiffSource,
+    /// Il percorso così come compare nella lista dei file, relativo alla
+    /// radice del repository. Una directory non tracciata (`dir/`) copre
+    /// tutti i file che contiene, a meno che non sia a sua volta un
+    /// repository: i suoi file non appartengono a questo, e il diff non ha
+    /// righe.
+    pub(crate) path: String,
+}
+
+/// Il diff di un file, nella forma in cui si può mostrare.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum FileDiff {
+    /// Righe della patch, intestazione compresa, come le stampa
+    /// `git diff`: almeno un blocco di righe aggiunte, tolte o di contesto.
+    Text(Vec<String>),
+    /// Il file è cambiato, ma non come testo: un binario non ha righe da
+    /// confrontare.
+    Binary,
+    /// Nessuna riga da mostrare: un file vuoto aggiunto, un cambio dei soli
+    /// permessi, un repository annidato non tracciato, o un file che nel
+    /// frattempo non ha più modifiche.
+    NoTextChanges,
+}

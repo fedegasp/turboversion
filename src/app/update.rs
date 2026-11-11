@@ -13,7 +13,7 @@ use super::menu::{open_menu_by_hotkey, update_menu};
 use super::model::{max_diff_scroll, MenuState, Model, Overlay, PanelContent};
 use super::panel::Panel;
 use super::results::{
-    apply_branch_created, apply_branch_deleted, apply_commit_files, apply_loaded,
+    apply_branch_created, apply_branch_deleted, apply_commit_files, apply_file_diff, apply_loaded,
 };
 
 pub(crate) fn update(model: &mut Model, msg: Msg) -> Vec<Cmd> {
@@ -38,12 +38,9 @@ pub(crate) fn update(model: &mut Model, msg: Msg) -> Vec<Cmd> {
             branches,
             commits,
             files,
-            diff,
-        } => apply_loaded(model, branches, commits, files, diff),
-        Msg::CommitFilesLoaded { id, result } => {
-            apply_commit_files(model, id, result);
-            Vec::new()
-        }
+        } => apply_loaded(model, branches, commits, files),
+        Msg::CommitFilesLoaded { id, result } => apply_commit_files(model, id, result),
+        Msg::FileDiffLoaded { target, result } => apply_file_diff(model, target, result),
         Msg::BranchCreated { name, result } => {
             apply_branch_created(model, name, result);
             Vec::new()
@@ -94,7 +91,7 @@ fn refuse_if_git_is_gone(model: &mut Model, cmds: Vec<Cmd>) -> Vec<Cmd> {
 fn asked_by_the_user(cmd: &Cmd) -> bool {
     match cmd {
         Cmd::LoadAll | Cmd::CreateBranch(_) | Cmd::DeleteBranch(_) => true,
-        Cmd::LoadCommitFiles(_) => false,
+        Cmd::LoadCommitFiles(_) | Cmd::LoadFileDiff(_) => false,
     }
 }
 
@@ -122,7 +119,7 @@ fn apply_diff_viewport(model: &mut Model, height: u16) {
     model.diff_viewport = height;
     model.diff_scroll = model
         .diff_scroll
-        .min(max_diff_scroll(model.diff.len(), height));
+        .min(max_diff_scroll(model.diff_line_count(), height));
 }
 
 /// Registra che le operazioni git non sono più disponibili e lo annuncia
@@ -180,30 +177,23 @@ fn toggle_stage(model: &mut Model) {
         PanelContent::CommitFiles(_) | PanelContent::ChangesNotice(_) => {}
         // `content_mut(Panel::Changes)` non restituisce altro: ramo
         // impossibile, che si chiude senza effetti.
-        PanelContent::Branches(_) | PanelContent::History(_) | PanelContent::Diff { .. } => {}
+        PanelContent::Branches(_)
+        | PanelContent::History(_)
+        | PanelContent::Diff { .. }
+        | PanelContent::DiffNotice(_) => {}
     }
 }
 
 /// Muove di `delta` righe il pannello a fuoco, qualunque sia il suo
 /// contenuto: quale lista tocchi lo decide `Model::content_mut`, non questa
-/// funzione. Su History il pannello Changes segue la nuova selezione, e
-/// per un commit ne chiede i file.
+/// funzione. Poi Changes e Diff seguono la nuova selezione, se è cambiata:
+/// su History Changes passa a un'altra riga, su Changes Diff a un altro
+/// file. Un passo che non cambia nulla (sul Diff, o fermo al bordo di una
+/// lista) non chiede nulla e non tocca lo scorrimento del diff.
 fn step(model: &mut Model, delta: i32) -> Vec<Cmd> {
     let focus = model.focus;
-    if focus == Panel::History {
-        // Una nuova selezione mostra un commit diverso: lo scroll del diff
-        // precedente non ha più senso.
-        model.diff_scroll = 0;
-    }
     model.content_mut(focus).step(delta);
-    if focus != Panel::History {
-        return Vec::new();
-    }
-    model
-        .sync_changes_with_history()
-        .map(Cmd::LoadCommitFiles)
-        .into_iter()
-        .collect()
+    model.follow_selection()
 }
 
 #[cfg(test)]
@@ -221,6 +211,13 @@ mod tests {
         Cmd::LoadCommitFiles(CommitId("abc".to_string()))
     }
 
+    fn diff_read() -> Cmd {
+        Cmd::LoadFileDiff(crate::git::domain::DiffTarget {
+            source: crate::git::domain::DiffSource::WorkingCopy,
+            path: "a.txt".to_string(),
+        })
+    }
+
     /// Una lettura che segue la navigazione, da sola, si scarta in
     /// silenzio; insieme a un'azione chiesta dall'utente si scarta lo
     /// stesso, ma il dialog compare: l'azione dell'utente va rifiutata
@@ -228,12 +225,13 @@ mod tests {
     #[test]
     fn without_git_a_user_action_is_refused_aloud_even_next_to_a_navigation_read() {
         let mut model = model_without_git();
-        assert!(refuse_if_git_is_gone(&mut model, vec![navigation_read()]).is_empty());
+        assert!(refuse_if_git_is_gone(&mut model, vec![navigation_read(), diff_read()]).is_empty());
         assert!(model.dialog().is_none(), "solo navigazione: nessun dialog");
 
         for cmds in [
             vec![navigation_read(), Cmd::DeleteBranch("develop".to_string())],
             vec![Cmd::CreateBranch("x".to_string()), navigation_read()],
+            vec![diff_read(), Cmd::DeleteBranch("develop".to_string())],
         ] {
             let mut model = model_without_git();
             assert!(refuse_if_git_is_gone(&mut model, cmds).is_empty());

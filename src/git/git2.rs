@@ -10,7 +10,9 @@
 //! di rami locali; le altre scritture (stage, commit, checkout) arriveranno
 //! in passi successivi.
 
-use super::domain::{Branch, BranchKind, Commit, CommitId, FileEntry, FileStatus};
+use super::domain::{
+    Branch, BranchKind, Commit, CommitId, DiffSource, DiffTarget, FileDiff, FileEntry, FileStatus,
+};
 use super::repo::{GitError, Repo};
 use super::validate::{
     branch_already_exists, branch_not_found, current_branch_not_deletable, validate_branch_name,
@@ -51,6 +53,87 @@ fn from_git2(err: git2::Error) -> GitError {
 /// stava provando a fare quando è fallita.
 fn from_git2_while(context: &str, err: git2::Error) -> GitError {
     GitError(format!("{context}: {}", err.message()))
+}
+
+impl GitRepo {
+    /// Ciò che il commit `id` ha cambiato: il confronto con il suo primo
+    /// parent, come `git show --first-parent`, cioè per un merge ciò che ha
+    /// portato nel ramo su cui è stato fatto. Senza parent (il primo
+    /// commit, o la radice di un ramo orfano) il confronto è con l'albero
+    /// vuoto, e ogni file del commit risulta aggiunto.
+    ///
+    /// È il confronto unico su cui si reggono sia l'elenco dei file di un
+    /// commit sia il diff di uno di essi: un file elencato deve avere un
+    /// diff, e viceversa.
+    fn commit_diff(
+        &self,
+        id: &CommitId,
+        opts: Option<&mut git2::DiffOptions>,
+    ) -> Result<git2::Diff<'_>, git2::Error> {
+        let oid = git2::Oid::from_str(id.as_str())?;
+        let commit = self.repo.find_commit(oid)?;
+        let tree = commit.tree()?;
+        let parent_tree = match commit.parents().next() {
+            Some(parent) => Some(parent.tree()?),
+            None => None,
+        };
+        self.repo
+            .diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), opts)
+    }
+
+    /// Le modifiche non committate: dall'albero di HEAD alla working copy
+    /// passando per l'indice, cioè `git diff HEAD`. Include sia ciò che è
+    /// già in stage sia ciò che non lo è, fusi: il pannello Changes ha una
+    /// riga sola per file, e un diff limitato a una delle due metà
+    /// nasconderebbe l'altra di un file messo in stage solo in parte.
+    ///
+    /// Senza HEAD (repository appena creato, nessun commit) il confronto è
+    /// con l'albero vuoto: ogni file risulta nuovo.
+    fn working_copy_diff(
+        &self,
+        opts: &mut git2::DiffOptions,
+    ) -> Result<git2::Diff<'_>, git2::Error> {
+        let head_tree = self.repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+        self.repo
+            .diff_tree_to_workdir_with_index(head_tree.as_ref(), Some(opts))
+    }
+}
+
+/// Le righe di una patch come le stampa `git diff`, e che cosa contiene:
+/// righe di testo, un binario, oppure niente da mostrare oltre
+/// l'intestazione.
+fn patch_of(diff: &git2::Diff<'_>) -> Result<FileDiff, git2::Error> {
+    let mut patch = String::new();
+    let mut text = false;
+    let mut binary = false;
+    diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
+        match line.origin() {
+            // Le righe di contenuto e di contesto portano il carattere di
+            // origine davanti, come in `git diff`; le intestazioni (file,
+            // blocco) lo hanno già nel testo.
+            origin @ ('+' | '-' | ' ') => {
+                text = true;
+                patch.push(origin);
+            }
+            // "Binary files a/x and b/x differ": un file cambiato che non
+            // ha righe da confrontare.
+            'B' => binary = true,
+            _ => {}
+        }
+        // `from_utf8_lossy`, non `from_utf8` scartato in silenzio: su
+        // contenuto non UTF-8 il carattere di origine già accodato sopra
+        // resterebbe orfano, senza testo né a capo, e si fonderebbe con la
+        // riga successiva.
+        patch.push_str(&String::from_utf8_lossy(line.content()));
+        true
+    })?;
+    Ok(if text {
+        FileDiff::Text(patch.lines().map(str::to_string).collect())
+    } else if binary {
+        FileDiff::Binary
+    } else {
+        FileDiff::NoTextChanges
+    })
 }
 
 impl Repo for GitRepo {
@@ -178,22 +261,7 @@ impl Repo for GitRepo {
         let context = format!("Cannot read the files of commit {short}");
         let fail = |err: git2::Error| from_git2_while(&context, err);
 
-        let oid = git2::Oid::from_str(id.as_str()).map_err(fail)?;
-        let commit = self.repo.find_commit(oid).map_err(fail)?;
-        let tree = commit.tree().map_err(fail)?;
-        // Solo il primo parent, come `git show --first-parent`: per un
-        // merge, ciò che ha portato nel ramo su cui è stato fatto. Senza
-        // parent (il primo commit, o la radice di un ramo orfano) il
-        // confronto è con l'albero vuoto, cioè ogni file del commit risulta
-        // aggiunto.
-        let parent_tree = match commit.parents().next() {
-            Some(parent) => Some(parent.tree().map_err(fail)?),
-            None => None,
-        };
-        let diff = self
-            .repo
-            .diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None)
-            .map_err(fail)?;
+        let diff = self.commit_diff(id, None).map_err(fail)?;
 
         Ok(diff
             .deltas()
@@ -235,55 +303,32 @@ impl Repo for GitRepo {
             .collect())
     }
 
-    fn diff(&self) -> Vec<String> {
+    fn file_diff(&self, target: &DiffTarget) -> Result<FileDiff, GitError> {
+        let context = format!("Cannot read the diff of {}", target.path);
+        let fail = |err: git2::Error| from_git2_while(&context, err);
+
         let mut opts = git2::DiffOptions::new();
-        // `show_untracked_content` serve a includere il *contenuto* dei
-        // file non tracciati nella patch testuale (`include_untracked` da
-        // solo li elenca soltanto, con un header ma senza corpo).
-        opts.include_untracked(true).show_untracked_content(true);
-
-        // HEAD -> worktree passando per l'indice (concettualmente
-        // `git diff HEAD`): include sia le modifiche già in stage (index vs
-        // HEAD) sia quelle non in stage (worktree vs index), fuse in un
-        // solo diff. `diff_index_to_workdir` da solo (usato in una versione
-        // precedente di questo metodo) è l'equivalente di `git diff` senza
-        // `--cached`, cioè solo index vs worktree: un file staged senza
-        // ulteriori modifiche nel worktree risulterebbe assente dal diff,
-        // pur comparendo come "staged" nel pannello Changes (`files()`,
-        // che guarda giustamente prima l'indice) — un'incoerenza visibile
-        // tra i due pannelli. `None` per l'albero quando HEAD non esiste
-        // ancora (repository appena creato, nessun commit): tratta tutti i
-        // file come nuovi rispetto a un albero vuoto.
-        let head_tree = self.repo.head().ok().and_then(|h| h.peel_to_tree().ok());
-        let Ok(diff) = self
-            .repo
-            .diff_tree_to_workdir_with_index(head_tree.as_ref(), Some(&mut opts))
-        else {
-            return Vec::new();
-        };
-
-        let mut patch = String::new();
-        let printed = diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
-            // Antepone il carattere di origin (+/-/spazio) alle righe di
-            // contenuto/contesto, come fa `git diff`; le righe di intestazione
-            // (file, hunk, binary) non hanno un carattere di origin da
-            // anteporre, il loro testo lo contiene già.
-            if matches!(line.origin(), '+' | '-' | ' ') {
-                patch.push(line.origin());
+        // Il percorso si confronta alla lettera, non come un glob: un nome
+        // con `*` o `[` toccherebbe altri file. Una directory resta un
+        // prefisso, quindi `dir/` (come lo elenca lo stato di una
+        // directory non tracciata) copre i file che contiene.
+        opts.pathspec(&target.path).disable_pathspec_match(true);
+        let diff = match &target.source {
+            DiffSource::WorkingCopy => {
+                // Il contenuto dei file non tracciati, non solo il loro
+                // nome: senza `show_untracked_content` la patch ha
+                // l'intestazione e nessuna riga. `recurse_untracked_dirs`
+                // apre una directory non tracciata nei file che contiene;
+                // non apre un repository annidato, che resta senza righe.
+                opts.include_untracked(true)
+                    .show_untracked_content(true)
+                    .recurse_untracked_dirs(true);
+                self.working_copy_diff(&mut opts)
             }
-            // `from_utf8_lossy`, non `from_utf8` scartato silenziosamente:
-            // su contenuto non-UTF-8 valido, scartare la riga lascerebbe il
-            // carattere di origin già accodato sopra "orfano" (senza
-            // contenuto né newline), fondendosi con la riga successiva e
-            // corrompendo l'output senza alcun errore visibile.
-            patch.push_str(&String::from_utf8_lossy(line.content()));
-            true
-        });
-        if printed.is_err() {
-            return Vec::new();
+            DiffSource::Commit(id) => self.commit_diff(id, Some(&mut opts)),
         }
-
-        patch.lines().map(str::to_string).collect()
+        .map_err(fail)?;
+        patch_of(&diff).map_err(fail)
     }
 
     fn create_branch(&mut self, name: &str) -> Result<Branch, GitError> {
@@ -700,46 +745,336 @@ mod tests {
         assert!(!notes.staged);
     }
 
-    #[test]
-    fn diff_includes_untracked_and_modified_content() {
-        let dir = tempfile::tempdir().unwrap();
-        init_repo_with_a_commit(dir.path());
-        fs::write(dir.path().join("README.md"), "hello\nworld\n").unwrap();
-        fs::write(dir.path().join("notes.txt"), "scratch\n").unwrap();
+    fn wc(path: &str) -> DiffTarget {
+        DiffTarget {
+            source: DiffSource::WorkingCopy,
+            path: path.to_string(),
+        }
+    }
 
-        let real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
-        let diff = real.diff();
-        let text = diff.join("\n");
+    fn of_commit(oid: git2::Oid, path: &str) -> DiffTarget {
+        DiffTarget {
+            source: DiffSource::Commit(CommitId(oid.to_string())),
+            path: path.to_string(),
+        }
+    }
 
-        assert!(text.contains("README.md"));
-        assert!(text.contains("+world"));
-        assert!(text.contains("notes.txt"));
+    /// Le righe di un diff che deve essere testuale.
+    fn text_of(real: &GitRepo, target: &DiffTarget) -> String {
+        match real.file_diff(target) {
+            Ok(FileDiff::Text(lines)) => lines.join("\n"),
+            other => panic!("{target:?}: atteso un diff testuale, non {other:?}"),
+        }
     }
 
     #[test]
-    fn diff_shows_staged_changes_even_without_further_worktree_edits() {
+    fn the_working_copy_diff_of_a_file_leaves_the_other_files_out() {
         let dir = tempfile::tempdir().unwrap();
         let repo = init_repo_with_a_commit(dir.path());
+        commit_changes(
+            &repo,
+            &[("other.txt", "one\n")],
+            &[],
+            &[&head_commit(&repo)],
+            "Other",
+        );
+        fs::write(dir.path().join("README.md"), "hello\nworld\n").unwrap();
+        fs::write(dir.path().join("other.txt"), "one\ntwo\n").unwrap();
+        fs::write(dir.path().join("notes.txt"), "scratch\n").unwrap();
 
-        // Staged e basta: modifica scritta, aggiunta all'indice, e nessun
-        // ulteriore tocco al file nel worktree dopo l'`add`. Un diff
-        // index-vs-workdir puro (`git diff` senza `--cached`) qui
-        // risulterebbe vuoto, pur comparendo il file come "staged" in
-        // `files()`: un'incoerenza che questo test previene.
-        fs::write(dir.path().join("README.md"), "hello\nstaged change\n").unwrap();
+        let real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+        let readme = text_of(&real, &wc("README.md"));
+        assert!(readme.contains("+world"), "{readme}");
+        assert!(!readme.contains("other.txt") && !readme.contains("notes.txt"));
+
+        // Un file non tracciato mostra il suo contenuto, non solo il nome.
+        let notes = text_of(&real, &wc("notes.txt"));
+        assert!(notes.contains("+scratch"), "{notes}");
+        assert!(!notes.contains("README.md"));
+    }
+
+    /// Staged e non: il diff della working copy è `git diff HEAD`, quindi
+    /// una modifica già nell'indice si vede anche senza altri ritocchi al
+    /// file, e insieme a quelle fatte dopo.
+    #[test]
+    fn the_working_copy_diff_includes_what_is_already_staged() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_a_commit(dir.path());
+        fs::write(dir.path().join("README.md"), "hello\nstaged\n").unwrap();
         let mut index = repo.index().unwrap();
         index.add_path(Path::new("README.md")).unwrap();
         index.write().unwrap();
 
         let real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
-        let diff = real.diff();
-        let text = diff.join("\n");
+        assert!(text_of(&real, &wc("README.md")).contains("+staged"));
 
+        fs::write(dir.path().join("README.md"), "hello\nstaged\nlater\n").unwrap();
+        let both = text_of(&real, &wc("README.md"));
         assert!(
-            text.contains("+staged change"),
-            "il diff deve mostrare la modifica staged anche senza ulteriori \
-             modifiche nel worktree; diff ottenuto: {text:?}"
+            both.contains("+staged") && both.contains("+later"),
+            "{both}"
         );
+    }
+
+    /// La directory non tracciata compare in Changes come `dir/`: il suo
+    /// diff è quello dei file che contiene. Il percorso non è un glob, e
+    /// non è nemmeno un prefisso qualsiasi: `READ` non è `README.md`.
+    #[test]
+    fn the_path_is_matched_literally_and_a_directory_covers_its_files() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_a_commit(dir.path());
+        fs::create_dir(dir.path().join("newdir")).unwrap();
+        fs::write(dir.path().join("newdir/inner.txt"), "inside\n").unwrap();
+        fs::write(dir.path().join("README.md"), "changed\n").unwrap();
+
+        let real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+        let listed = real.files();
+        assert!(listed.iter().any(|f| f.path == "newdir/"), "{listed:?}");
+        assert!(text_of(&real, &wc("newdir/")).contains("+inside"));
+
+        for not_a_file in ["READ", "*.md", "README.m?"] {
+            assert_eq!(
+                real.file_diff(&wc(not_a_file)),
+                Ok(FileDiff::NoTextChanges),
+                "{not_a_file:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_binary_file_and_an_empty_new_file_have_no_text_to_show() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_a_commit(dir.path());
+        let with_binary = commit_changes(
+            &repo,
+            &[("logo.bin", "\u{0}\u{1}\u{2}")],
+            &[],
+            &[&head_commit(&repo)],
+            "Binary",
+        );
+        fs::write(dir.path().join("logo.bin"), b"\x00\x03\x04").unwrap();
+        fs::write(dir.path().join("empty.txt"), "").unwrap();
+
+        let real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(real.file_diff(&wc("logo.bin")), Ok(FileDiff::Binary));
+        assert_eq!(
+            real.file_diff(&of_commit(with_binary, "logo.bin")),
+            Ok(FileDiff::Binary)
+        );
+        assert_eq!(
+            real.file_diff(&wc("empty.txt")),
+            Ok(FileDiff::NoTextChanges)
+        );
+        // Un file senza modifiche non ha nulla da mostrare, e non è un
+        // errore: la lista dei file può essere più vecchia del disco.
+        assert_eq!(
+            real.file_diff(&wc("README.md")),
+            Ok(FileDiff::NoTextChanges)
+        );
+    }
+
+    /// Il diff di un file in un commit è ciò che quel commit gli ha fatto
+    /// rispetto al primo parent: né le modifiche della working copy né
+    /// quelle di altri commit allo stesso file.
+    #[test]
+    fn the_diff_of_a_file_in_a_commit_is_against_the_first_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_a_commit(dir.path());
+        let second = commit_changes(
+            &repo,
+            &[("README.md", "hello\nsecond\n"), ("x.txt", "x\n")],
+            &[],
+            &[&head_commit(&repo)],
+            "Second",
+        );
+        let third = commit_changes(
+            &repo,
+            &[("README.md", "hello\nsecond\nthird\n")],
+            &["x.txt"],
+            &[&head_commit(&repo)],
+            "Third",
+        );
+        fs::write(dir.path().join("README.md"), "dirty\n").unwrap();
+
+        let real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+        let in_third = text_of(&real, &of_commit(third, "README.md"));
+        assert!(in_third.contains("+third"), "{in_third}");
+        assert!(!in_third.contains("+second") && !in_third.contains("dirty"));
+        assert!(!in_third.contains("x.txt"), "un altro file del commit");
+
+        // Il file cancellato dal commit ha il suo diff, dal lato del parent.
+        assert!(text_of(&real, &of_commit(third, "x.txt")).contains("-x"));
+        // Un file che il commit non tocca non ha differenze.
+        assert_eq!(
+            real.file_diff(&of_commit(second, "nope.txt")),
+            Ok(FileDiff::NoTextChanges)
+        );
+    }
+
+    #[test]
+    fn the_diff_of_a_file_in_the_root_commit_is_against_the_empty_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_a_commit(dir.path());
+        let root = head_commit(&repo).id();
+
+        let real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+        let text = text_of(&real, &of_commit(root, "README.md"));
+        assert!(text.contains("new file mode"), "{text}");
+        assert!(text.contains("+hello"), "{text}");
+    }
+
+    #[test]
+    fn the_diff_of_a_file_in_a_merge_is_against_its_first_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_a_commit(dir.path());
+        let base = head_commit(&repo);
+        let side = commit_changes(&repo, &[("side.txt", "side\n")], &[], &[&base], "Side");
+        let side = repo.find_commit(side).unwrap();
+        repo.set_head_detached(base.id()).unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+            .unwrap();
+        let main = commit_changes(&repo, &[("main.txt", "main\n")], &[], &[&base], "Main");
+        let main = repo.find_commit(main).unwrap();
+        let merge = commit_changes(
+            &repo,
+            &[("side.txt", "side\n")],
+            &[],
+            &[&main, &side],
+            "Merge side",
+        );
+
+        let real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+        assert!(text_of(&real, &of_commit(merge, "side.txt")).contains("+side"));
+        assert_eq!(
+            real.file_diff(&of_commit(merge, "main.txt")),
+            Ok(FileDiff::NoTextChanges),
+            "già nel primo parent"
+        );
+    }
+
+    /// Senza alcun commit HEAD non esiste: il confronto parte dall'albero
+    /// vuoto, e un file nuovo, in stage o no, mostra tutto il contenuto.
+    #[test]
+    fn the_working_copy_diff_works_before_the_first_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        fs::write(dir.path().join("staged.txt"), "in index\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("staged.txt")).unwrap();
+        index.write().unwrap();
+        fs::write(dir.path().join("loose.txt"), "not added\n").unwrap();
+
+        let real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+        assert!(text_of(&real, &wc("staged.txt")).contains("+in index"));
+        assert!(text_of(&real, &wc("loose.txt")).contains("+not added"));
+    }
+
+    /// Un cambio dei soli permessi è una modifica senza righe: c'è
+    /// l'intestazione con i modi, nessun blocco di righe.
+    #[cfg(unix)]
+    #[test]
+    fn a_change_of_permissions_only_has_no_text_changes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_a_commit(dir.path());
+        let readme = dir.path().join("README.md");
+        fs::set_permissions(&readme, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+        assert!(
+            real.files().iter().any(|f| f.path == "README.md"),
+            "il cambio di modo è una modifica della working copy"
+        );
+        assert_eq!(
+            real.file_diff(&wc("README.md")),
+            Ok(FileDiff::NoTextChanges)
+        );
+
+        // Lo stesso cambio, committato.
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("README.md")).unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = repo.signature().unwrap();
+        let chmod = repo
+            .commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                "chmod",
+                &tree,
+                &[&head_commit(&repo)],
+            )
+            .unwrap();
+        assert_eq!(
+            real.file_diff(&of_commit(chmod, "README.md")),
+            Ok(FileDiff::NoTextChanges)
+        );
+    }
+
+    /// Un nome che contiene caratteri da glob si prende alla lettera: il
+    /// file con quel nome c'è, e solo lui.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_named_like_a_glob_is_found_by_its_own_name() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_a_commit(dir.path());
+        for (name, content) in [
+            ("a*b.txt", "star\n"),
+            ("axb.txt", "plain\n"),
+            ("c[1].txt", "bracket\n"),
+            ("c1.txt", "one\n"),
+        ] {
+            fs::write(dir.path().join(name), content).unwrap();
+        }
+
+        let real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+        let star = text_of(&real, &wc("a*b.txt"));
+        assert!(star.contains("+star") && !star.contains("+plain"), "{star}");
+        let bracket = text_of(&real, &wc("c[1].txt"));
+        assert!(
+            bracket.contains("+bracket") && !bracket.contains("+one"),
+            "{bracket}"
+        );
+    }
+
+    /// Una directory non tracciata che contiene un repository annidato non
+    /// si apre: è un altro repository, e i suoi file non sono di questo.
+    /// Compare in Changes come `dir/`, e il suo diff non ha righe.
+    #[test]
+    fn an_untracked_nested_repository_is_not_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_a_commit(dir.path());
+        let nested = dir.path().join("nested");
+        init_repo_with_a_commit(&nested);
+        fs::write(nested.join("inner.txt"), "inner\n").unwrap();
+
+        let real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+        let listed = real.files();
+        assert!(listed.iter().any(|f| f.path == "nested/"), "{listed:?}");
+        assert_eq!(real.file_diff(&wc("nested/")), Ok(FileDiff::NoTextChanges));
+    }
+
+    #[test]
+    fn the_diff_of_an_unknown_commit_is_an_error_that_names_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_a_commit(dir.path());
+        let real = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+
+        for id in ["0123456789012345678901234567890123456789", "not-a-hash"] {
+            let err = real
+                .file_diff(&DiffTarget {
+                    source: DiffSource::Commit(CommitId(id.to_string())),
+                    path: "README.md".to_string(),
+                })
+                .expect_err("nessun commit con questo id");
+            assert!(
+                err.to_string()
+                    .starts_with("Cannot read the diff of README.md"),
+                "{err}"
+            );
+        }
     }
 
     #[test]

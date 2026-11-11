@@ -24,7 +24,7 @@ pub(crate) mod statusbar;
 use ratatui::{
     layout::Rect,
     style::Style,
-    widgets::{List, ListItem, ListState},
+    widgets::{List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 
@@ -45,5 +45,22 @@ pub(crate) fn render_list(
             .highlight_style(selection),
         area,
         state,
+    );
+}
+
+/// Una riga di testo al posto del contenuto di un pannello, per dire perché
+/// non c'è nulla da elencare o da scorrere: condivisa da Changes e Diff. Va
+/// a capo: un messaggio d'errore del backend può essere più largo del
+/// pannello, e troncato non si leggerebbe.
+///
+/// I testi che le arrivano usano solo caratteri a larghezza certa (tre
+/// punti ASCII invece dell'ellissi Unicode, che è "East Asian ambiguous" e
+/// su alcuni terminali occupa due celle).
+pub(crate) fn render_notice_text(f: &mut Frame, text: &str, area: Rect) {
+    f.render_widget(
+        Paragraph::new(text)
+            .style(theme::window().fg(theme::DIM))
+            .wrap(Wrap { trim: true }),
+        area,
     );
 }

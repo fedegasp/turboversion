@@ -144,7 +144,6 @@ fn deleting_without_any_local_branch_shows_a_message_instead_of_doing_nothing_si
             branches: Vec::new(),
             commits: Vec::new(),
             files: Vec::new(),
-            diff: Vec::new(),
         },
     );
     run_menu_action(&mut app, MenuAction::DeleteBranch);
@@ -261,7 +260,6 @@ fn with_an_empty_remotes_panel_focused_there_is_no_branch_to_refuse() {
             branches: locals,
             commits: Vec::new(),
             files: Vec::new(),
-            diff: Vec::new(),
         },
     );
     assert!(app.remote_branches.is_empty());

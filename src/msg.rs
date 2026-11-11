@@ -10,7 +10,7 @@
 //! produce `Cmd`) ed `effects` (esegue `Cmd` contro `Repo`, produce il
 //! `Msg` di esito).
 
-use crate::git::domain::{Branch, Commit, CommitId, FileEntry};
+use crate::git::domain::{Branch, Commit, CommitId, DiffTarget, FileDiff, FileEntry};
 use crate::git::repo::GitError;
 
 /// Evento verso `update`. Le varianti "di tasto" (`Esc`, `Enter`, ...) sono
@@ -58,12 +58,12 @@ pub(crate) enum Msg {
     /// la stessa porta di ogni altro evento, invece di restare un effetto
     /// collaterale muto.
     WorkerLost,
-    /// Esito di `Cmd::LoadAll`: i dati iniziali letti da `Repo`.
+    /// Esito di `Cmd::LoadAll`: i dati iniziali letti da `Repo`. Il diff
+    /// non c'è: dipende dal file selezionato, e lo si chiede dopo.
     Loaded {
         branches: Vec<Branch>,
         commits: Vec<Commit>,
         files: Vec<FileEntry>,
-        diff: Vec<String>,
     },
     /// Esito di `Cmd::LoadCommitFiles`. `id` è il commit chiesto, e serve
     /// a riconoscere un esito arrivato tardi: se nel frattempo la selezione
@@ -72,6 +72,13 @@ pub(crate) enum Msg {
     CommitFilesLoaded {
         id: CommitId,
         result: Result<Vec<FileEntry>, GitError>,
+    },
+    /// Esito di `Cmd::LoadFileDiff`. `target` è il diff chiesto, e come
+    /// `id` per `CommitFilesLoaded` serve a scartare un esito che la
+    /// selezione ha già superato.
+    FileDiffLoaded {
+        target: DiffTarget,
+        result: Result<FileDiff, GitError>,
     },
     /// Esito di `Cmd::CreateBranch`; `name` è il nome digitato (già
     /// normalizzato), utile per ripopolare il dialog in caso di errore.
@@ -90,11 +97,14 @@ pub(crate) enum Msg {
 /// `effects::run`).
 #[derive(Debug)]
 pub(crate) enum Cmd {
-    /// Carica branch/commit/file/diff iniziali.
+    /// Carica rami, commit e file della working copy.
     LoadAll,
     /// Legge i file toccati da un commit, per il pannello Changes. Lo
     /// chiede `update` quando la selezione di History arriva su un commit.
     LoadCommitFiles(CommitId),
+    /// Legge il diff di un file, per il pannello Diff. Lo chiede `update`
+    /// quando cambia il file selezionato in Changes, o il suo contesto.
+    LoadFileDiff(DiffTarget),
     CreateBranch(String),
     DeleteBranch(String),
 }

@@ -46,7 +46,6 @@ fn load(app: &mut TestApp, commits: Vec<Commit>, files: Vec<FileEntry>) {
             branches: Vec::new(),
             commits,
             files,
-            diff: Vec::new(),
         },
     );
 }
@@ -273,7 +272,6 @@ fn the_uncommitted_row_does_not_follow_the_changes_panel() {
             branches: Vec::new(),
             commits,
             files: Vec::new(),
-            diff: Vec::new(),
         },
     );
     app.run(cmds);

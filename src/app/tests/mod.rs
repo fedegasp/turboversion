@@ -20,6 +20,7 @@ use std::ops::{Deref, DerefMut};
 mod branches;
 mod changes;
 mod diff;
+mod diff_follow;
 mod overlays;
 mod panels;
 mod worker_loss;

@@ -18,7 +18,8 @@ changes and diff, all visible at once, navigable entirely from the keyboard.
 > working copy has changes, History shows an "Uncommitted changes" row above
 > the log. The Changes panel follows the History selection: the working copy
 > on that row, the files touched by the selected commit on any other. The
-> Diff panel doesn't follow it yet: it always shows the whole repository.
+> Diff panel follows the Changes selection: it shows the diff of the selected
+> file only, in the same context (working copy or commit).
 > Creating and deleting local branches writes to the repository for real;
 > staging and commits don't yet. `src/git/mock.rs` is now test-only fixture
 > data.
@@ -68,10 +69,23 @@ Vision touches.
   files are loading, when they can't be read, or once git is no longer
   available, the panel says so instead of going blank. Renames show up as a
   delete plus an add.
+- **Diff follows Changes**: the Diff panel shows the diff of the file
+  selected in Changes, and nothing else. On the working copy it is
+  `git diff HEAD` for that file — staged and unstaged changes together,
+  since Changes has a single row per file — and untracked files show their
+  content; on a commit it is what that commit did to the file, compared
+  with its first parent (or with nothing, for the root commit). Binary
+  files, files with no line changes (an empty new file, a permission
+  change) and read errors each get their own message in the panel. Moving
+  quickly through History or Changes doesn't flood git with reads: at most
+  one read per panel is in flight at a time, so the rows you only pass over
+  are mostly never read. Going back to one of the last commits you looked
+  at shows its files and diff again without reading them.
 - **Keyboard-driven UX**: panel switching, list navigation, stage checkbox
   toggle (display only so far — see Status), diff scrolling — scrolling
   stops with the last line of the diff at the bottom of the panel, instead
-  of pushing it to the top of an otherwise empty panel.
+  of pushing it to the top of an otherwise empty panel, and goes back to
+  the top only when a different diff is shown.
 - **Turbo Vision-style menu bar**: `F10` or `Alt+<letter>` opens a dropdown
   menu, navigable with arrow keys.
 - **Modal dialogs**: Turbo Vision-style message boxes, Yes/No confirmations and
@@ -88,7 +102,7 @@ Vision touches.
 - [x] Branch creation/deletion (local branches). Checkout still missing.
 - [x] Make Changes follow the History selection: the working copy for the
       uncommitted row, the files of the commit otherwise.
-- [ ] Make Diff follow it too: the diff of the file selected in Changes.
+- [x] Make Diff follow it too: the diff of the file selected in Changes.
 - [ ] Stage/unstage and commit from the UI.
 - [ ] Wire up the remaining menu actions. Working so far: `File > Quit`,
       `Help > About`, `Branch > New branch...` and `Branch > Delete` (both
@@ -149,18 +163,28 @@ cargo test
 > right edge, like `less -S`. There is no horizontal scrolling, so the tail
 > of a line wider than the panel can't be read.
 
+> **Note:** the diff of the working copy is read again every time the
+> repository is reloaded, even if nothing changed: for a moment the panel
+> says "Loading..." and the scroll position goes back to the top. An
+> untracked directory that is itself a Git repository shows "No text changes
+> to show", since its files belong to another repository.
+
 > **Note:** git work happens on a worker thread. If that thread dies — a
 > defect in the backend, or in `git2` itself — the app does not quit: it says
 > so once with a "Git unavailable" dialog, then keeps a `!` marker at the
-> head of the status bar. Branches, log, files and diff already read stay on
-> screen and can still be browsed; they just don't refresh any more, and any
-> action that would need git is refused with that same message instead of
-> failing silently. Restart to use git again. The refusal names the condition
-> but not the action refused, so a confirmed "Delete branch" turns into a bare
-> "Git unavailable", and text typed into "New branch" is lost. Moving through
-> History never brings up that dialog: the files of the commit on screen, and
-> of the last commit you left, stay readable; any other commit shows
-> "Git unavailable: files not loaded".
+> head of the status bar. Branches, log and the working copy's file list
+> already read stay on screen and can still be browsed; they just don't
+> refresh any more, and any action that would need git is refused with that
+> same message instead of failing silently. Restart to use git again. The
+> refusal names the condition but not the action refused, so a confirmed
+> "Delete branch" turns into a bare "Git unavailable", and text typed into
+> "New branch" is lost. Moving through History never brings up that dialog:
+> the files of the last 8 commits you looked at, and the last 8 diffs you
+> opened in those commits, stay readable; any other commit shows "Git
+> unavailable: files not loaded". The working copy's diff is not kept: back
+> on the "Uncommitted changes" row the file list is still there, but the Diff
+> panel shows "Git unavailable: diff not loaded", because files on disk may
+> have changed since it was read.
 
 ### Dialogs
 
@@ -190,9 +214,17 @@ src/
 │   │                   inside app/, so drawing can't
 │   ├── model/          Model and its overlays; Model::content_mut(), the
 │   │                   single "panel -> data" table; HistoryEntry, the
-│   │                   History rows (the commits, plus the uncommitted one);
-│   │                   changes.rs: what the Changes panel shows, the working
-│   │                   copy or a commit's files and whether they have arrived
+│   │                   History rows (the commits, plus the uncommitted one)
+│   │   ├── changes.rs    What the Changes panel shows: the working copy or
+│   │   │                 a commit's files
+│   │   ├── reading.rs    Reading<K, T>: data read while navigating (a
+│   │   │                 commit's files, a file's diff), tied to what it
+│   │   │                 was read for, and whether it has arrived; Kept,
+│   │   │                 the last views already read, so going back
+│   │   │                 doesn't read them again
+│   │   └── navigation.rs Changes follows History, Diff follows Changes;
+│   │                     which reads to ask for, at most one in flight per
+│   │                     panel
 │   ├── dialogs.rs      Every dialog the app can show, built in one place:
 │   │                   one function per dialog, private to app/
 │   ├── menu.rs         The menu bar's items (MENUS) and its key handling
@@ -201,7 +233,8 @@ src/
 │   ├── update.rs       update(): Msg -> Model changes and Cmds; main-panel keys
 │   ├── run.rs          The main loop: the only file in app/ that does I/O
 │   ├── test_support.rs Test-only helpers: a Model filled with the mock data
-│   └── tests/          Tests of update()
+│   └── tests/          Tests of update(); diff_follow.rs: the Diff panel
+│                       following Changes
 ├── msg.rs            Msg (incoming events) and Cmd (requested effects)
 ├── effects.rs        Runs a Cmd against Repo, produces the resulting Msg
 ├── worker.rs         Worker thread owning the Repo, so git never blocks the UI
@@ -210,7 +243,8 @@ src/
 │   └── mod.rs        Key events -> Msg
 ├── git/
 │   ├── repo.rs       The Repo trait: the only boundary towards git
-│   ├── domain.rs     Branch, CommitId, Commit, FileEntry: git as the app sees it
+│   ├── domain.rs     Branch, CommitId, Commit, FileEntry, DiffTarget,
+│   │                 FileDiff: git as the app sees it
 │   ├── git2.rs       Real repository backend, via `git2`
 │   ├── validate.rs   Branch-name rules and error messages, shared by backends
 │   └── mock.rs       Test-only fixture data

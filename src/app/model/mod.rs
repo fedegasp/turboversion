@@ -8,11 +8,17 @@
 use super::list_panel::ListPanel;
 use super::panel::Panel;
 use crate::dialog::Dialog;
-use crate::git::domain::{Branch, Commit, CommitId, FileEntry};
+use crate::git::domain::{Branch, Commit, CommitId, DiffTarget, FileDiff, FileEntry};
 
 mod changes;
+mod navigation;
+mod reading;
 
-pub(crate) use changes::{ChangesView, CommitChanges, CommitLoad};
+pub(crate) use changes::{ChangesView, CommitLoad};
+pub(crate) use navigation::DiffView;
+use navigation::InFlight;
+pub(crate) use reading::Load;
+use reading::{Kept, Reading};
 
 #[derive(Clone, Copy)]
 pub(crate) struct MenuState {
@@ -95,6 +101,33 @@ pub(crate) enum PanelContent<'a> {
         scroll: &'a mut u16,
         viewport: u16,
     },
+    /// Il pannello Diff non ha righe da mostrare: al posto del testo si
+    /// dice perché.
+    DiffNotice(DiffNotice<'a>),
+}
+
+/// Perché il pannello Diff non ha righe da scorrere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DiffNotice<'a> {
+    /// In Changes non c'è un file selezionato perché la lista è vuota.
+    NoFile,
+    /// Il diff è stato chiesto e non è ancora arrivato; oppure Changes sta
+    /// ancora aspettando i file del commit, da cui il diff dipende.
+    Loading,
+    /// I file del commit non si sono potuti leggere, quindi non c'è un
+    /// file di cui mostrare il diff. L'errore lo dice già Changes: qui non
+    /// si ripete.
+    FilesNotRead,
+    /// Il file è cambiato, ma è un binario: non ci sono righe da mostrare.
+    Binary,
+    /// Il file non ha righe cambiate da mostrare (vuoto, permessi, oppure
+    /// non più modificato).
+    NoTextChanges,
+    /// La lettura è fallita; il messaggio è quello del backend.
+    Failed(&'a str),
+    /// Le operazioni git non sono più possibili: il diff non arriverà, o
+    /// non arriveranno i file del commit da cui dipende.
+    GitUnavailable,
 }
 
 /// Perché il pannello Changes, su un commit, non ha una lista da mostrare.
@@ -117,7 +150,7 @@ impl PanelContent<'_> {
             Self::History(list) => list.step(delta),
             Self::WorkingCopyFiles(list) | Self::CommitFiles(list) => list.step(delta),
             // Nessuna riga da percorrere.
-            Self::ChangesNotice(_) => {}
+            Self::ChangesNotice(_) | Self::DiffNotice(_) => {}
             Self::Diff {
                 lines,
                 scroll,
@@ -176,16 +209,24 @@ pub(crate) struct Model {
     /// copy si ritrovano così com'erano, cursore compreso.
     pub(crate) working_copy_files: ListPanel<FileEntry>,
     /// Che cosa mostra il pannello Changes. Segue la selezione di History
-    /// e si cambia solo da `sync_changes_with_history`,
-    /// `receive_commit_files` e `lose_git`.
+    /// e si cambia solo da `navigation` e da `lose_git`.
     changes: ChangesView,
-    /// L'ultima vista di un commit con i file già arrivati, lasciata quando
-    /// la selezione è passata altrove. Tornarci la ritrova senza
-    /// rileggerla: un commit non cambia. È una sola, non una cache: basta
-    /// per l'andirivieni fra due righe vicine, e dopo la perdita del worker
-    /// è ciò che resta leggibile oltre alla vista corrente.
-    last_commit: Option<CommitChanges>,
-    pub(crate) diff: Vec<String>,
+    /// Le viste dei file di commit già arrivati, lasciate quando la
+    /// selezione è passata altrove: tornarci le ritrova com'erano, cursore
+    /// compreso, senza rileggerle. Un commit non cambia.
+    kept_commits: Kept<CommitId, ListPanel<FileEntry>>,
+    /// Che cosa mostra il pannello Diff: il diff del file selezionato in
+    /// Changes, nel contesto di Changes. `None` se non c'è un file
+    /// selezionato. Segue Changes e si cambia solo da `navigation` e da
+    /// `lose_git`.
+    diff: DiffView,
+    /// I diff di file di commit già arrivati, lasciati quando la selezione
+    /// è passata altrove. Quelli della working copy non si conservano: i
+    /// file su disco cambiano, e tornarci li rilegge.
+    kept_diffs: Kept<DiffTarget, FileDiff>,
+    /// Le letture che seguono la navigazione partite e non ancora tornate:
+    /// al più una per tipo (vedi `navigation`).
+    in_flight: InFlight,
     pub(crate) diff_scroll: u16,
     /// Righe visibili nel pannello Diff nell'ultimo frame disegnato: il
     /// limite dello scorrimento dipende da quante righe ci stanno. Lo
@@ -218,8 +259,10 @@ impl Model {
             history: ListPanel::empty(),
             working_copy_files: ListPanel::empty(),
             changes: ChangesView::WorkingCopy,
-            last_commit: None,
-            diff: Vec::new(),
+            kept_commits: Kept::new(),
+            diff: None,
+            kept_diffs: Kept::new(),
+            in_flight: InFlight::default(),
             diff_scroll: 0,
             diff_viewport: 0,
             git_available: true,
@@ -239,14 +282,17 @@ impl Model {
     /// cambiano nulla, così chi chiama può annunciare la perdita una
     /// volta sola senza tenere conti propri.
     ///
-    /// Chiude anche l'eventuale attesa dei file di un commit: il `Cmd` che
-    /// li stava leggendo non avrà mai un esito, e il pannello deve dirlo
-    /// invece di restare in attesa per sempre.
+    /// Chiude anche le attese aperte, dei file di un commit e del diff di
+    /// un file: il `Cmd` che li stava leggendo non avrà mai un esito, e i
+    /// pannelli devono dirlo invece di restare in attesa per sempre.
     pub(super) fn lose_git(&mut self) -> bool {
         let first = self.git_available;
         self.git_available = false;
         if let ChangesView::Commit(shown) = &mut self.changes {
             shown.give_up_waiting();
+        }
+        if let Some(diff) = &mut self.diff {
+            diff.give_up_waiting();
         }
         first
     }
@@ -289,11 +335,47 @@ impl Model {
                     }
                 },
             },
-            Panel::Diff => PanelContent::Diff {
-                lines: &self.diff,
-                scroll: &mut self.diff_scroll,
-                viewport: self.diff_viewport,
-            },
+            Panel::Diff => {
+                let notice = match self.diff.as_ref().map(Reading::load) {
+                    Some(Load::Loaded(FileDiff::Text(lines))) => {
+                        return PanelContent::Diff {
+                            lines,
+                            scroll: &mut self.diff_scroll,
+                            viewport: self.diff_viewport,
+                        }
+                    }
+                    // Senza un file selezionato il motivo sta in Changes:
+                    // sui file di un commit che non ci sono il diff non
+                    // ha un file da cui partire, e lo dice con lo stesso
+                    // stato della lista che manca.
+                    None => match &self.changes {
+                        ChangesView::Commit(shown) => match shown.load() {
+                            Load::Awaiting => DiffNotice::Loading,
+                            Load::Failed(_) => DiffNotice::FilesNotRead,
+                            Load::Unavailable => DiffNotice::GitUnavailable,
+                            Load::Loaded(_) => DiffNotice::NoFile,
+                        },
+                        ChangesView::WorkingCopy => DiffNotice::NoFile,
+                    },
+                    Some(Load::Awaiting) => DiffNotice::Loading,
+                    Some(Load::Loaded(FileDiff::Binary)) => DiffNotice::Binary,
+                    Some(Load::Loaded(FileDiff::NoTextChanges)) => DiffNotice::NoTextChanges,
+                    Some(Load::Failed(message)) => DiffNotice::Failed(message),
+                    Some(Load::Unavailable) => DiffNotice::GitUnavailable,
+                };
+                PanelContent::DiffNotice(notice)
+            }
+        }
+    }
+
+    /// Le righe del diff a schermo, zero se il pannello mostra un
+    /// segnaposto: è su queste che si limita lo scorrimento.
+    pub(super) fn diff_line_count(&self) -> usize {
+        match self.diff.as_ref().map(Reading::load) {
+            Some(Load::Loaded(FileDiff::Text(lines))) => lines.len(),
+            Some(Load::Loaded(FileDiff::Binary | FileDiff::NoTextChanges))
+            | Some(Load::Awaiting | Load::Failed(_) | Load::Unavailable)
+            | None => 0,
         }
     }
 
@@ -367,76 +449,10 @@ impl Model {
         &self.changes
     }
 
-    /// Allinea il pannello Changes alla riga selezionata in History, e
-    /// restituisce il commit di cui servono i file, se ce n'è uno da
-    /// chiedere. Va chiamata dopo ogni cambiamento della selezione di
-    /// History (un tasto, una rilettura del log).
-    ///
-    /// Se Changes mostra già quella riga non cambia nulla e non chiede
-    /// nulla: rileggere il log senza che la selezione si sposti lascia i
-    /// file e il loro cursore dove stavano. Nemmeno tornare sull'ultimo
-    /// commit lasciato con i file già arrivati chiede nulla: la sua vista
-    /// viene ripresa così com'era. Una History vuota mostra la working
-    /// copy, che in quel caso è vuota anche lei.
-    ///
-    /// Senza git un commit mai letto non viene chiesto: la vista nasce già
-    /// "non disponibile", invece di aspettare un esito che non arriverà.
-    ///
-    /// Non tocca History: è ciò che impedisce il ciclo selezione ->
-    /// ricarico -> cursore in cima -> nuova selezione.
-    pub(super) fn sync_changes_with_history(&mut self) -> Option<CommitId> {
-        let wanted = match self.history.selected() {
-            None | Some(HistoryEntry::WorkingCopy) => None,
-            Some(HistoryEntry::Commit(c)) => Some(c.id.clone()),
-        };
-        let (next, ask) = match (wanted, &self.changes) {
-            (None, ChangesView::WorkingCopy) => return None,
-            (Some(id), ChangesView::Commit(shown)) if *shown.id() == id => return None,
-            (None, ChangesView::Commit(_)) => (ChangesView::WorkingCopy, None),
-            (Some(id), ChangesView::WorkingCopy | ChangesView::Commit(_)) => {
-                match self.take_kept(&id) {
-                    Some(kept) => (ChangesView::Commit(kept), None),
-                    None if !self.git_available => {
-                        (ChangesView::Commit(CommitChanges::unavailable(id)), None)
-                    }
-                    None => (
-                        ChangesView::Commit(CommitChanges::requested(id.clone())),
-                        Some(id),
-                    ),
-                }
-            }
-        };
-        if let ChangesView::Commit(left) = std::mem::replace(&mut self.changes, next) {
-            if left.is_loaded() {
-                self.last_commit = Some(left);
-            }
-        }
-        ask
-    }
-
-    /// Riprende la vista conservata in `last_commit`, se è quella del commit
-    /// `id`; altrimenti la lascia dov'è.
-    fn take_kept(&mut self, id: &CommitId) -> Option<CommitChanges> {
-        if self.last_commit.as_ref().is_some_and(|k| k.id() == id) {
-            self.last_commit.take()
-        } else {
-            None
-        }
-    }
-
-    /// Consegna a Changes l'esito della lettura dei file del commit `id`, e
-    /// dice se era atteso. Un esito che non lo è (la selezione è passata
-    /// altrove prima che arrivasse, o è un doppione) viene scartato senza
-    /// toccare nulla, errore compreso.
-    pub(super) fn receive_commit_files(
-        &mut self,
-        id: &CommitId,
-        result: Result<Vec<FileEntry>, String>,
-    ) -> bool {
-        match &mut self.changes {
-            ChangesView::Commit(shown) => shown.receive(id, result),
-            ChangesView::WorkingCopy => false,
-        }
+    /// Che cosa mostra il pannello Diff.
+    #[cfg(test)]
+    pub(crate) fn diff(&self) -> &DiffView {
+        &self.diff
     }
 
     /// Le righe di History, per i test che le ispezionano da fuori: la

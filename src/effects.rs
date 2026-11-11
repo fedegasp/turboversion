@@ -29,11 +29,14 @@ pub(crate) fn run(cmd: Cmd, repo: &mut dyn Repo) -> Msg {
             branches: repo.branches(),
             commits: repo.commits(),
             files: repo.files(),
-            diff: repo.diff(),
         },
         Cmd::LoadCommitFiles(id) => {
             let result = repo.files_of_commit(&id);
             Msg::CommitFilesLoaded { id, result }
+        }
+        Cmd::LoadFileDiff(target) => {
+            let result = repo.file_diff(&target);
+            Msg::FileDiffLoaded { target, result }
         }
         Cmd::CreateBranch(name) => {
             let result = repo.create_branch(&name);
@@ -59,7 +62,6 @@ mod tests {
             branches,
             commits,
             files,
-            diff,
         } = msg
         else {
             panic!("expected Msg::Loaded");
@@ -67,7 +69,36 @@ mod tests {
         assert_eq!(branches.len(), repo.branches().len());
         assert_eq!(commits.len(), repo.commits().len());
         assert_eq!(files.len(), repo.files().len());
-        assert_eq!(diff.len(), repo.diff().len());
+    }
+
+    #[test]
+    fn load_file_diff_carries_the_requested_target_on_both_outcomes() {
+        use crate::git::domain::{CommitId, DiffSource, DiffTarget, FileDiff};
+
+        let mut repo = MockGitRepo::new();
+        let known = DiffTarget {
+            source: DiffSource::WorkingCopy,
+            path: repo.files()[0].path.clone(),
+        };
+        let Msg::FileDiffLoaded { target, result } =
+            run(Cmd::LoadFileDiff(known.clone()), &mut repo)
+        else {
+            panic!("expected Msg::FileDiffLoaded");
+        };
+        assert_eq!(target, known);
+        assert!(matches!(result, Ok(FileDiff::Text(lines)) if !lines.is_empty()));
+
+        let unknown = DiffTarget {
+            source: DiffSource::Commit(CommitId("nope".to_string())),
+            path: "x".to_string(),
+        };
+        let Msg::FileDiffLoaded { target, result } =
+            run(Cmd::LoadFileDiff(unknown.clone()), &mut repo)
+        else {
+            panic!("expected Msg::FileDiffLoaded");
+        };
+        assert_eq!(target, unknown);
+        assert!(result.is_err());
     }
 
     #[test]

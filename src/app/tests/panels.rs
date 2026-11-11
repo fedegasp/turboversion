@@ -16,7 +16,6 @@ fn space_on_an_empty_changes_list_does_not_panic() {
             branches: Vec::new(),
             commits: Vec::new(),
             files: Vec::new(),
-            diff: Vec::new(),
         },
     );
     assert_eq!(

@@ -14,7 +14,7 @@
 
 use std::fmt;
 
-use super::domain::{Branch, Commit, CommitId, FileEntry};
+use super::domain::{Branch, Commit, CommitId, DiffTarget, FileDiff, FileEntry};
 
 /// Errore di un'operazione `Repo`, con un messaggio già pronto per essere
 /// mostrato in un dialog. Oggi un messaggio di testo semplice basta a
@@ -29,8 +29,8 @@ impl fmt::Display for GitError {
     }
 }
 
-/// Confine unico verso git: letture (branch/commit/file/diff) e le due
-/// operazioni mutanti supportate da questo prototipo.
+/// Confine unico verso git: letture (rami, commit, file, diff di un file)
+/// e le due operazioni mutanti supportate da questo prototipo.
 pub(crate) trait Repo {
     fn branches(&self) -> Vec<Branch>;
     fn commits(&self) -> Vec<Commit>;
@@ -45,7 +45,14 @@ pub(crate) trait Repo {
     /// una lista vuota: chi chiede un commit preciso deve poter distinguere
     /// "nessun file" da "commit illeggibile".
     fn files_of_commit(&self, id: &CommitId) -> Result<Vec<FileEntry>, GitError>;
-    fn diff(&self) -> Vec<String>;
+    /// Il diff del solo file `target.path`, nel contesto `target.source`:
+    /// per la working copy dall'ultimo commit ai file su disco passando per
+    /// l'indice (come `git diff HEAD`), per un commit verso il suo primo
+    /// parent (o l'albero vuoto), come `files_of_commit`.
+    ///
+    /// Come `files_of_commit` restituisce un errore invece di un diff
+    /// vuoto: "niente da mostrare" e "illeggibile" vanno distinti.
+    fn file_diff(&self, target: &DiffTarget) -> Result<FileDiff, GitError>;
     fn create_branch(&mut self, name: &str) -> Result<Branch, GitError>;
     fn delete_branch(&mut self, name: &str) -> Result<(), GitError>;
 }

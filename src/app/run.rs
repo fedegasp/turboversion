@@ -337,7 +337,6 @@ mod tests {
                 branches: vec![branch],
                 commits: Vec::new(),
                 files: Vec::new(),
-                diff: Vec::new(),
             })
             .expect("il canale di prova è aperto");
         // Il worker muore con un esito già in coda: quell'esito è valido

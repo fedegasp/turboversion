@@ -49,7 +49,6 @@ pub(crate) fn model_without_changes_for_tests() -> Model {
             branches: repo.branches(),
             commits: repo.commits(),
             files: Vec::new(),
-            diff: repo.diff(),
         },
     );
     run_to_completion(&mut model, &mut repo, cmds);

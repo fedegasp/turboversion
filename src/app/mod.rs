@@ -29,9 +29,9 @@ mod tests;
 #[cfg(test)]
 pub(crate) use menu::MenuAction;
 pub(crate) use menu::MENUS;
+pub(crate) use model::{ChangesNotice, DiffNotice, HistoryEntry, MenuState, Model, PanelContent};
 #[cfg(test)]
-pub(crate) use model::Overlay;
-pub(crate) use model::{ChangesNotice, HistoryEntry, MenuState, Model, PanelContent};
+pub(crate) use model::{Load, Overlay};
 pub(crate) use panel::Panel;
 pub(crate) use run::run;
 #[cfg(test)]

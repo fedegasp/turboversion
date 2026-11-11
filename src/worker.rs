@@ -203,7 +203,7 @@ impl Drop for Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::domain::{Branch, Commit, CommitId, FileEntry};
+    use crate::git::domain::{Branch, Commit, CommitId, DiffTarget, FileDiff, FileEntry};
     use crate::git::mock::MockGitRepo;
     use crate::git::repo::GitError;
     use std::time::{Duration, Instant};
@@ -226,7 +226,7 @@ mod tests {
         fn files_of_commit(&self, _id: &CommitId) -> Result<Vec<FileEntry>, GitError> {
             panic!("repo rotto");
         }
-        fn diff(&self) -> Vec<String> {
+        fn file_diff(&self, _target: &DiffTarget) -> Result<FileDiff, GitError> {
             panic!("repo rotto");
         }
         fn create_branch(&mut self, _name: &str) -> Result<Branch, GitError> {
@@ -308,8 +308,8 @@ mod tests {
         fn files_of_commit(&self, _id: &CommitId) -> Result<Vec<FileEntry>, GitError> {
             unreachable!("non usato da questo test")
         }
-        fn diff(&self) -> Vec<String> {
-            Vec::new()
+        fn file_diff(&self, _target: &DiffTarget) -> Result<FileDiff, GitError> {
+            unreachable!("non usato da questo test")
         }
         fn create_branch(&mut self, _name: &str) -> Result<Branch, GitError> {
             unreachable!("non usato da questo test")
