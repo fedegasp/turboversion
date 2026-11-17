@@ -35,7 +35,11 @@ impl fmt::Display for GitError {
 pub(crate) trait Repo {
     fn branches(&self) -> Vec<Branch>;
     fn commits(&self) -> Vec<Commit>;
-    /// I file della working copy con modifiche non committate.
+    /// I file della working copy con modifiche non committate. Una
+    /// directory non tracciata è una riga sola (`dir/`), tranne quando
+    /// contiene un repository annidato: allora è aperta fino a lui, così
+    /// che ogni riga tranne quella del repository annidato (`dir/nested/`)
+    /// si possa mettere in stage.
     fn files(&self) -> Vec<FileEntry>;
     /// I file toccati dal commit `id`: il confronto con il suo primo
     /// parent, o con l'albero vuoto per un commit senza parent. Per un

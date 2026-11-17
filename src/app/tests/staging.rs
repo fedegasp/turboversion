@@ -440,3 +440,79 @@ fn without_git_stage_and_commit_are_refused_out_loud() {
         Some(Staging::Staged)
     );
 }
+
+/// Sul backend reale, una directory non tracciata con un repository
+/// annidato arriva in Changes già aperta: `Space` sul file accanto lo
+/// mette in stage e il cursore resta su di lui, mentre sulla riga del
+/// repository annidato è rifiutato con un messaggio che indica i file
+/// accanto, senza cambiare nulla.
+#[test]
+fn space_stages_a_file_next_to_a_nested_repository_on_a_real_repo() {
+    use crate::git::git2::GitRepo;
+    use std::fs;
+    use std::path::Path;
+
+    fn init_with_a_commit(dir: &Path) {
+        let repo = ::git2::Repository::init(dir).unwrap();
+        let mut config = repo.config().unwrap();
+        config.set_str("user.name", "Test User").unwrap();
+        config.set_str("user.email", "test@example.com").unwrap();
+        fs::write(dir.join("README.md"), "hello\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("README.md")).unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = repo.signature().unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "Initial commit", &tree, &[])
+            .unwrap();
+    }
+    fn press_on(model: &mut Model, repo: &mut GitRepo, code: KeyCode) {
+        let msg = input::key_to_msg(KeyEvent::new(code, KeyModifiers::NONE)).unwrap();
+        let cmds = update(model, msg);
+        run_to_completion(model, repo, cmds);
+    }
+    fn paths(model: &Model) -> Vec<&str> {
+        model
+            .working_copy_files
+            .items()
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect()
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    init_with_a_commit(dir.path());
+    fs::create_dir_all(dir.path().join("d/sub")).unwrap();
+    fs::write(dir.path().join("d/a.txt"), "a\n").unwrap();
+    fs::write(dir.path().join("d/sub/b.txt"), "b\n").unwrap();
+    init_with_a_commit(&dir.path().join("d/nested"));
+    let mut repo = GitRepo::discover(dir.path().to_str().unwrap()).unwrap();
+    let mut model = Model::new();
+    run_to_completion(&mut model, &mut repo, init_cmds());
+    assert_eq!(paths(&model), ["d/a.txt", "d/nested/", "d/sub/"]);
+    model.focus = Panel::Changes;
+
+    press_on(&mut model, &mut repo, KeyCode::Char(' '));
+
+    let a = &model.working_copy_files.items()[0];
+    assert_eq!(
+        (a.path.as_str(), a.status, a.staging),
+        ("d/a.txt", FileStatus::Added, Staging::Staged)
+    );
+    assert_eq!(
+        model.working_copy_files.selected().map(|f| f.path.as_str()),
+        Some("d/a.txt")
+    );
+
+    press_on(&mut model, &mut repo, KeyCode::Down);
+    press_on(&mut model, &mut repo, KeyCode::Char(' '));
+
+    let text = model.dialog().map(|d| d.text.clone()).unwrap_or_default();
+    assert!(text.contains("is a nested repository"), "{text}");
+    assert!(text.contains("one by one"), "{text}");
+    assert_eq!(paths(&model), ["d/a.txt", "d/nested/", "d/sub/"]);
+    assert_eq!(
+        model.working_copy_files.selected().map(|f| f.path.as_str()),
+        Some("d/nested/")
+    );
+}

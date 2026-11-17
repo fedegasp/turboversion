@@ -22,7 +22,7 @@ pub(crate) enum Msg {
     /// Scorciatoia globale (Ctrl+C o Alt+X): esce sempre, indipendentemente
     /// dagli overlay aperti.
     Quit,
-    /// Alt+<lettera>: richiesta di aprire il menu con quella hotkey.
+    /// `Alt+<lettera>`: richiesta di aprire il menu con quella hotkey.
     /// Ignorata da `update` se c'è un dialog modale aperto.
     OpenMenuByHotkey(char),
     F10,

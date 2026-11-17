@@ -86,7 +86,9 @@ Vision touches.
   for staged, `[ ]` for unstaged and `[~]` for a file staged only in part
   (staged, then changed again), and `Space` on it stages the rest. Staging
   a deleted file stages its deletion, an untracked directory is staged with
-  all the files in it, and unstaging a new file makes it untracked again
+  all the files in it (except one that contains a nested Git repository:
+  that one is shown opened up, so the files next to the nested repository
+  can be staged one by one), and unstaging a new file makes it untracked again
   (also before the first commit). The checkbox changes when the repository,
   read again after the write, says so — never ahead of it. `Commit >
   Commit...` asks for a message and commits what is staged; an empty
@@ -183,10 +185,16 @@ cargo test
 > twice instead of staging and then unstaging it (the repository is not
 > harmed). An untracked directory that is itself a Git repository shows
 > "Nested repository" in the Diff panel, since its files belong to another
-> repository, and can't be staged from here: staging a directory that
-> contains one is refused with a message, without staging anything. Changes
-> lists such a directory as a single row, so its other files have to be
-> staged with `git`. A tracked submodule is different: when it points to a
+> repository, and can't be staged from here: `Space` on it is refused with a message,
+> without staging anything. An untracked directory that contains one is
+> opened up in Changes: each file next to the nested repository gets its own
+> row and is staged one by one, any subdirectory without a nested repository
+> stays a single `sub/` row and is staged whole, and the nested repository
+> stays a row of its own that can't be staged. To find out which untracked
+> directories to open, every untracked directory is read in full each time
+> the repository is reloaded, so after every `Space`: with many untracked
+> files (tens of thousands, or a `node_modules/` that isn't ignored) this
+> can add a noticeable delay. A tracked submodule is different: when it points to a
 > new commit it is staged like any other change, and the Diff panel shows
 > the `-Subproject commit` / `+Subproject commit` lines, as `git diff` does.
 

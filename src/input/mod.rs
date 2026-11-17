@@ -6,7 +6,7 @@
 //
 
 //! Traduce i `KeyEvent` di crossterm in `Msg`, incluse le scorciatoie
-//! globali (Ctrl+C, Alt+X, Alt+<lettera>). *Come* un `Msg` debba essere
+//! globali (Ctrl+C, Alt+X, `Alt+<lettera>`). *Come* un `Msg` debba essere
 //! interpretato in base allo stato corrente (dialog aperto, menu aperto, o
 //! nessuno dei due) spetta a `app::update`: qui si traduce solo il tasto
 //! premuto, senza leggere il `Model`.
@@ -25,7 +25,7 @@ pub(crate) fn key_to_msg(key: KeyEvent) -> Option<Msg> {
         return Some(Msg::Quit);
     }
 
-    // Alt+X chiude sempre; Alt+<lettera> è una richiesta di apertura menu
+    // Alt+X chiude sempre; `Alt+<lettera>` è una richiesta di apertura menu
     // (è `update` a ignorarla se c'è un dialog modale aperto). I tasti che
     // combinano Alt con Ctrl (AltGr, su molte tastiere non-US) non sono
     // scorciatoie di menu: cadono nel ramo sotto, altrimenti i caratteri

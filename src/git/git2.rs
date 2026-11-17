@@ -165,6 +165,49 @@ impl GitRepo {
         index.read(false)?;
         Ok(index)
     }
+
+    /// Le righe di Changes per la directory non tracciata `dir`, se
+    /// contiene un repository annidato a qualunque profondità; `None` se
+    /// non ne contiene (o se non si riesce a leggerla), e allora resta la
+    /// riga `dir/` dello stato. Le righe sono quelle di `untracked_rows`.
+    fn untracked_dir_around_nested(&self, dir: &str) -> Option<Vec<FileEntry>> {
+        // Lo stesso confronto di `stage_file`: ciò che si elenca qui è
+        // esattamente ciò che lo stage di una riga troverebbe.
+        let mut opts = git2::DiffOptions::new();
+        opts.pathspec(dir)
+            .disable_pathspec_match(true)
+            .include_untracked(true)
+            .recurse_untracked_dirs(true);
+        let diff = self
+            .repo
+            .diff_index_to_workdir(None, Some(&mut opts))
+            .ok()?;
+
+        let mut nested = Vec::new();
+        let mut untracked = Vec::new();
+        for delta in diff.deltas() {
+            if let Some(path) = nested_repository(&delta) {
+                nested.push(as_dir(path));
+            } else if delta.status() == git2::Delta::Untracked {
+                if let Some(path) = delta.new_file().path() {
+                    untracked.push(path.to_string_lossy().into_owned());
+                }
+            }
+        }
+        if nested.is_empty() {
+            return None;
+        }
+        Some(
+            untracked_rows(dir, &untracked, &nested)
+                .into_iter()
+                .map(|path| FileEntry {
+                    path,
+                    status: FileStatus::Untracked,
+                    staging: Staging::Unstaged,
+                })
+                .collect(),
+        )
+    }
 }
 
 /// Il percorso di un repository annidato, se `delta` è uno: una directory
@@ -174,7 +217,7 @@ impl GitRepo {
 /// Solo se non tracciata: un submodule è anch'esso un gitlink, ma è già
 /// nell'indice, e un suo commit cambiato si mette in stage (e si mostra
 /// nel diff) come ogni altra modifica.
-fn nested_repository(delta: git2::DiffDelta<'_>) -> Option<String> {
+fn nested_repository(delta: &git2::DiffDelta<'_>) -> Option<String> {
     let file = delta.new_file();
     let untracked_repo = delta.status() == git2::Delta::Untracked
         && matches!(file.mode(), git2::FileMode::Tree | git2::FileMode::Commit);
@@ -182,6 +225,80 @@ fn nested_repository(delta: git2::DiffDelta<'_>) -> Option<String> {
         .then(|| file.path())
         .flatten()
         .map(|path| path.to_string_lossy().into_owned())
+}
+
+/// `path` come directory, con la `/` finale con cui lo stato la elenca:
+/// il percorso del delta di un repository annidato non la porta di sicuro.
+fn as_dir(mut path: String) -> String {
+    if !path.ends_with('/') {
+        path.push('/');
+    }
+    path
+}
+
+/// Le righe con cui si mostra la directory non tracciata `dir`, che
+/// contiene i repository annidati `nested` e i file non tracciati
+/// `untracked` (tutti sotto `dir`, `nested` con la `/` finale).
+///
+/// Si apre solo il cammino verso i repository annidati: ogni
+/// repository annidato è una riga, ogni file che sta in una directory
+/// lungo quel cammino è una riga, e una sottodirectory che di repository
+/// annidati non ne contiene resta una riga `sub/`, come ogni altra
+/// directory non tracciata. Così ogni riga si mette in stage per intero,
+/// tranne quelle dei repository annidati. Ordinate per percorso.
+fn untracked_rows(dir: &str, untracked: &[String], nested: &[String]) -> Vec<String> {
+    let holds_nested = |prefix: &str| nested.iter().any(|n| n.starts_with(prefix));
+    let mut rows: Vec<String> = untracked
+        .iter()
+        .map(|file| {
+            let below = file.strip_prefix(dir).unwrap_or(file);
+            let start = file.len() - below.len();
+            // La sottodirectory più esterna sotto `dir` che non porta a un
+            // repository annidato; se non c'è, il file è una riga a sé.
+            below
+                .match_indices('/')
+                .map(|(at, _)| &file[..start + at + 1])
+                .find(|sub| !holds_nested(sub))
+                .unwrap_or(file)
+                .to_string()
+        })
+        .chain(nested.iter().cloned())
+        .collect();
+    rows.sort();
+    rows.dedup();
+    rows
+}
+
+/// La riga di Changes per una voce dello stato, o `None` se la voce non
+/// ha modifiche da mostrare.
+fn file_entry(entry: &git2::StatusEntry<'_>) -> Option<FileEntry> {
+    let path = entry.path().ok()?.to_string();
+    let status = entry.status();
+    // Un file può avere flag sia di INDEX_* che di WT_* insieme (es. staged
+    // e poi modificato di nuovo nel worktree): la lettera di stato è
+    // deterministicamente quella dell'indice, perché è ciò che finirebbe
+    // nel prossimo commit; che ci sia anche altro su disco lo dice
+    // `staging`.
+    let file_status = if status.contains(git2::Status::INDEX_NEW) {
+        FileStatus::Added
+    } else if status.contains(git2::Status::INDEX_MODIFIED) {
+        FileStatus::Modified
+    } else if status.contains(git2::Status::INDEX_DELETED) {
+        FileStatus::Deleted
+    } else if status.contains(git2::Status::WT_NEW) {
+        FileStatus::Untracked
+    } else if status.contains(git2::Status::WT_MODIFIED) {
+        FileStatus::Modified
+    } else if status.contains(git2::Status::WT_DELETED) {
+        FileStatus::Deleted
+    } else {
+        return None;
+    };
+    Some(FileEntry {
+        path,
+        status: file_status,
+        staging: staging_of(status),
+    })
 }
 
 /// Lo stato dell'indice di un file della working copy, dai flag di
@@ -216,7 +333,7 @@ fn staging_of(status: git2::Status) -> Staging {
 fn patch_of(diff: &git2::Diff<'_>) -> Result<FileDiff, git2::Error> {
     let nested = diff
         .deltas()
-        .any(|delta| nested_repository(delta).is_some());
+        .any(|delta| nested_repository(&delta).is_some());
     let mut patch = String::new();
     let mut text = false;
     let mut binary = false;
@@ -341,38 +458,24 @@ impl Repo for GitRepo {
             return Vec::new();
         };
 
-        statuses
-            .iter()
-            .filter_map(|entry| {
-                let path = entry.path().ok()?.to_string();
-                let status = entry.status();
-                // Un file può avere flag sia di INDEX_* che di WT_* insieme
-                // (es. staged e poi modificato di nuovo nel worktree): la
-                // lettera di stato è deterministicamente quella dell'indice,
-                // perché è ciò che finirebbe nel prossimo commit; che ci sia
-                // anche altro su disco lo dice `staging`.
-                let file_status = if status.contains(git2::Status::INDEX_NEW) {
-                    FileStatus::Added
-                } else if status.contains(git2::Status::INDEX_MODIFIED) {
-                    FileStatus::Modified
-                } else if status.contains(git2::Status::INDEX_DELETED) {
-                    FileStatus::Deleted
-                } else if status.contains(git2::Status::WT_NEW) {
-                    FileStatus::Untracked
-                } else if status.contains(git2::Status::WT_MODIFIED) {
-                    FileStatus::Modified
-                } else if status.contains(git2::Status::WT_DELETED) {
-                    FileStatus::Deleted
-                } else {
-                    return None;
-                };
-                Some(FileEntry {
-                    path,
-                    status: file_status,
-                    staging: staging_of(status),
-                })
-            })
-            .collect()
+        let mut files = Vec::with_capacity(statuses.len());
+        for entry in statuses.iter() {
+            let Some(file) = file_entry(&entry) else {
+                continue;
+            };
+            // Lo stato elenca una directory non tracciata come una riga
+            // sola, `dir/`. Se dentro c'è un repository annidato quella riga
+            // non si può mettere in stage, e i file accanto resterebbero
+            // irraggiungibili: la si apre, solo in questo caso.
+            if file.status == FileStatus::Untracked && file.path.ends_with('/') {
+                if let Some(rows) = self.untracked_dir_around_nested(&file.path) {
+                    files.extend(rows);
+                    continue;
+                }
+            }
+            files.push(file);
+        }
+        files
     }
 
     fn files_of_commit(&self, id: &CommitId) -> Result<Vec<FileEntry>, GitError> {
@@ -561,11 +664,19 @@ impl Repo for GitRepo {
             // appartengono a un altro repository, e libgit2 non sa
             // aggiungerlo come gitlink. Lo si dice prima di toccare
             // l'indice, così nemmeno i file accanto entrano a metà.
-            if let Some(nested) = diff.deltas().find_map(nested_repository) {
-                return Err(GitError(format!(
-                    "{context}: it contains a nested repository ({nested}) \
-                     and can't be staged from here. Use git from the command line."
-                )));
+            if let Some(nested) = diff.deltas().find_map(|delta| nested_repository(&delta)) {
+                let nested = as_dir(nested);
+                return Err(GitError(if as_dir(path.to_string()) == nested {
+                    format!(
+                        "{context}: it is a nested repository, and its files belong \
+                         to it. The files next to it can be staged one by one."
+                    )
+                } else {
+                    format!(
+                        "{context}: it contains a nested repository ({nested}) and \
+                         can't be staged as a whole. Stage the files next to it one by one."
+                    )
+                }));
             }
 
             let changed: Vec<(PathBuf, bool)> = diff
@@ -1410,8 +1521,8 @@ mod tests {
 
         assert!(err.0.contains("nested repository"), "{err}");
         assert!(err.0.contains("d/nested"), "{err}");
-        assert!(err.0.contains("can't be staged from here"), "{err}");
-        assert!(!err.0.contains("one by one"), "{err}");
+        assert!(err.0.contains("can't be staged as a whole"), "{err}");
+        assert!(err.0.contains("one by one"), "{err}");
         assert_eq!(index_on_disk(dir.path()), index_before);
         assert!(
             real.files().iter().all(|f| f.staging == Staging::Unstaged),
@@ -1505,6 +1616,130 @@ mod tests {
             real.file_diff(&wc("d/nested/")),
             Ok(FileDiff::NestedRepository)
         );
+    }
+
+    /// `d/a.txt`, `d/sub/b.txt` e un repository vero in `d/nested`, più
+    /// una directory `x/` senza repository annidati.
+    fn repo_with_a_nested_repository(dir: &Path) {
+        init_repo_with_a_commit(dir);
+        fs::create_dir_all(dir.join("d/sub")).unwrap();
+        fs::write(dir.join("d/a.txt"), "a\n").unwrap();
+        fs::write(dir.join("d/sub/b.txt"), "b\n").unwrap();
+        init_repo_with_a_commit(&dir.join("d/nested"));
+        fs::create_dir(dir.join("x")).unwrap();
+        fs::write(dir.join("x/c.txt"), "c\n").unwrap();
+    }
+
+    fn listed_paths(real: &GitRepo) -> Vec<String> {
+        real.files().into_iter().map(|f| f.path).collect()
+    }
+
+    /// Una directory non tracciata con un repository annidato si apre: i
+    /// suoi file sono righe a sé, il repository annidato una riga, e una
+    /// sottodirectory senza repository annidati resta compatta. Le altre
+    /// directory non tracciate restano una riga sola.
+    #[test]
+    fn files_opens_only_the_untracked_directories_with_a_nested_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        repo_with_a_nested_repository(dir.path());
+        let real = open(dir.path());
+
+        assert_eq!(
+            listed_paths(&real),
+            ["d/a.txt", "d/nested/", "d/sub/", "x/"]
+        );
+        assert!(
+            real.files()
+                .iter()
+                .all(|f| f.status == FileStatus::Untracked && f.staging == Staging::Unstaged),
+            "{:?}",
+            real.files()
+        );
+    }
+
+    /// Il cammino verso un repository annidato profondo si apre fino a
+    /// lui, e i file ignorati restano fuori anche lungo quel cammino.
+    #[test]
+    fn files_opens_the_path_to_a_deep_nested_repository_and_skips_ignored_files() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_a_commit(dir.path());
+        fs::create_dir_all(dir.path().join("d/deep/side")).unwrap();
+        fs::write(dir.path().join("d/deep/c.txt"), "c\n").unwrap();
+        fs::write(dir.path().join("d/deep/skip.log"), "log\n").unwrap();
+        fs::write(dir.path().join("d/deep/side/e.txt"), "e\n").unwrap();
+        init_repo_with_a_commit(&dir.path().join("d/deep/inner"));
+        fs::write(dir.path().join(".gitignore"), "*.log\n").unwrap();
+        let real = open(dir.path());
+
+        assert_eq!(
+            listed_paths(&real),
+            [
+                ".gitignore",
+                "d/deep/c.txt",
+                "d/deep/inner/",
+                "d/deep/side/"
+            ]
+        );
+    }
+
+    /// Un file accanto al repository annidato si mette in stage da solo e
+    /// se ne toglie; il repository annidato, come riga figlia, resta
+    /// rifiutato senza toccare l'indice e ha il suo segnaposto nel Diff.
+    #[test]
+    fn the_files_next_to_a_nested_repository_are_staged_one_by_one() {
+        let dir = tempfile::tempdir().unwrap();
+        repo_with_a_nested_repository(dir.path());
+        let mut real = open(dir.path());
+
+        real.stage_file("d/a.txt").unwrap();
+        assert_eq!(index_on_disk(dir.path()), ["README.md", "d/a.txt"]);
+        assert_eq!(
+            state_of(&real, "d/a.txt"),
+            Some((FileStatus::Added, Staging::Staged))
+        );
+        // Con un file tracciato la directory non è più tutta non
+        // tracciata, e lo stato la apre da sé: le righe non cambiano.
+        assert_eq!(
+            listed_paths(&real),
+            ["d/a.txt", "d/nested/", "d/sub/", "x/"]
+        );
+
+        let index_before = index_on_disk(dir.path());
+        let err = real.stage_file("d/nested/").unwrap_err();
+        assert!(err.0.contains("is a nested repository"), "{err}");
+        assert!(err.0.contains("one by one"), "{err}");
+        assert_eq!(index_on_disk(dir.path()), index_before);
+        assert_eq!(
+            real.file_diff(&wc("d/nested/")),
+            Ok(FileDiff::NestedRepository)
+        );
+
+        real.stage_file("d/sub/").unwrap();
+        assert_eq!(
+            index_on_disk(dir.path()),
+            ["README.md", "d/a.txt", "d/sub/b.txt"]
+        );
+
+        real.unstage_file("d/a.txt").unwrap();
+        assert_eq!(index_on_disk(dir.path()), ["README.md", "d/sub/b.txt"]);
+        assert_eq!(
+            state_of(&real, "d/a.txt"),
+            Some((FileStatus::Untracked, Staging::Unstaged))
+        );
+    }
+
+    #[test]
+    fn untracked_rows_open_only_the_path_to_the_nested_repositories() {
+        let owned = |paths: &[&str]| paths.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+        let untracked = owned(&["d/a.txt", "d/sub/b.txt", "d/sub/c/d.txt", "d/n/x/y.txt"]);
+        let nested = owned(&["d/n/x/inner/"]);
+
+        assert_eq!(
+            untracked_rows("d/", &untracked, &nested),
+            ["d/a.txt", "d/n/x/inner/", "d/n/x/y.txt", "d/sub/"]
+        );
+        // La directory stessa è il repository annidato: resta la sua riga.
+        assert_eq!(untracked_rows("n/", &[], &owned(&["n/"])), ["n/"]);
     }
 
     /// Un repository appena creato, con l'identità di test configurata e
